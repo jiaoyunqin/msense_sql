@@ -158,7 +158,8 @@ export function validateAbility(ability) {
   return issues;
 }
 
-export function formatValue(value, field = {}) {
+export function formatValue(value, field = {}, row = {}) {
+  if (field.role === "metric" && field.controlDash && row.is_control === 1) return "—";
   if (value === null || value === undefined) return field.nullDisplay || "—";
   if (field.role !== "metric" || field.type !== "number" || typeof value !== "number") return String(value);
   const digits = Math.min(6, Math.max(0, Number(field.precision ?? 2)));

@@ -1,7 +1,8 @@
 import {
   clone, uid, hash, slots, identifier, entities, itemDefinition, resolveItem,
   itemIssues, abilityIssues, itemQuerySignature, itemReviewSignature, itemCurrentRun,
-  abilityDefinition, abilitySignature, abilityQuerySignature, abilityCurrentRun
+  abilityDefinition, abilitySignature, abilityQuerySignature, abilityCurrentRun,
+  directQuery, outputDimensions, syncQueryGroups, completeGroup, currentActor, sourceType
 } from "./composer-data.js";
 import { parameterCatalog } from "./prototype-data.js";
 import { sqlQuery, parseMode, normalize, analyze } from "./prototype-engine.js";
@@ -38,7 +39,7 @@ function upstreamSQL(sql) {
   return "";
 }
 const parseRequests = new WeakMap();
-const editableFieldKeys = ["key", "name", "role", "type", "format", "precision", "unit", "nullDisplay", "description", "entity", "timing"];
+const editableFieldKeys = ["key", "name", "role", "type", "format", "precision", "unit", "nullDisplay", "description", "entity", "timing", "controlDash"];
 export function syncDimension(item) {
   const d = item.draft, sample = d.parseSample?.find((f) => f.alias === d.valueAlias);
   if (!d.valueTypeEdited && sample) d.valueType = sample.type;
@@ -91,10 +92,9 @@ export async function parseItem(item) {
     } else {
       mode.fields = mode.fields.map((f) => f.alias === "avg_order_value" && f.role === "pending" && !snapshot.fields.some((old) => old.alias === f.alias)
         ? { ...f, name: "平均订单金额", role: "metric", type: "number", format: "currency", unit: "元", description: "支付金额总和 / 支付订单记录数，由 SQL 按实际粒度计算。" } : f);
-      // Unknown outputs become editable final metrics with a visible SQL expression as
-      // the initial description; DS can replace it with the actual business definition.
+      // Types offer an editable starting point, never a fixed business role.
       mode.fields = mode.fields.map((f) => f.role === "pending" && !snapshot.fields.some((old) => old.alias === f.alias)
-        ? { ...f, role: "metric", description: f.description || `SQL 输出：${f.source}` } : f);
+        ? { ...f, role: f.type === "string" ? "dimension" : "metric", description: f.description || `SQL 输出：${f.source}` } : f);
     }
     mode.parameters.forEach((parameter) => {
       const initial = snapshot.parameters.find((p) => p.name === parameter.name);
@@ -154,6 +154,20 @@ function sourceSQL(item) {
 }
 export function compileMode(metric, dimensions = [], selectedKeys, group) {
   const d = metric.draft;
+  if (directQuery(metric)) {
+    if (dimensions.length) throw new Error("完整 SQL 按已声明的维度取数；其他下钻请提供对应 SQL。");
+    const dims = outputDimensions(metric), members = dims.map((f) => f.key);
+    const keys = selectedKeys || d.fields.filter((f) => f.role === "metric").map((f) => f.key);
+    return {
+      id: `${metric.id}__${group?.id || (members.length ? "query" : "overall")}`,
+      name: `${group?.name || (dims.length ? dims.map((f) => f.name).join(" × ") : "整体")} · ${metric.name}`,
+      key: group?.key || metric.key, description: group?.description || metric.description,
+      sql: d.sql, parsedSql: d.sql, parseError: "", removed: [], diff: [], revision: 1, runs: [],
+      kind: members.length > 1 ? "cross" : members.length ? "single" : "overall", members,
+      fields: clone(d.fields.filter((f) => f.role !== "metric" || keys.includes(f.key))),
+      parameters: mergedBindings([metric]), sourceDefinitions: clone([metric])
+    };
+  }
   if (dimensions.length) {
     for (const slot of slots) if (d.sql.split(`{{${slot}}}`).length !== 2)
       throw new Error(`下钻要求模板位置 {{${slot}}} 出现一次。`);
@@ -184,10 +198,31 @@ export function compileMode(metric, dimensions = [], selectedKeys, group) {
   return {
     id: `${metric.id}__${group?.id || "overall"}`, name: `${group?.name || "整体"} · ${metric.name}`,
     sql, parsedSql: sql, parseError: "", removed: [], diff: [], revision: 1, runs: [],
-    kind, members: dimensions.map((dim) => dim.draft.dimensionKey),
+    kind, key: group?.key || metric.key, description: group?.description || "",
+    members: dimensions.map((dim) => dim.draft.dimensionKey),
     fields: fields.filter((f) => f.role !== "metric" || keys.includes(f.key)),
     parameters: mergedBindings([metric, ...dimensions]), sourceDefinitions: clone([metric, ...dimensions])
   };
+}
+export function abilityModes(store, ability) {
+  const definition = ability.metrics.some((ref) => ref.definition) ? clone(ability) : abilityDefinition(store, ability), modes = [];
+  const groups = [...(definition.includeOverall ? [{ id: "overall", name: "整体", members: [] }] : []), ...definition.groups.filter((g) => !g.queryItemId)];
+  for (const ref of definition.metrics.filter((r) => r.metricKeys.length)) {
+    if (directQuery(ref.definition)) {
+      const dims = outputDimensions(ref.definition);
+      const group = dims.length ? definition.groups.find((g) => g.queryItemId === ref.itemId) : undefined;
+      if (dims.length && !group) throw new Error(`${ref.definition.name}：需要确认实际维度输出。`);
+      if (group || definition.includeOverall) modes.push(compileMode(ref.definition, [], ref.metricKeys, group));
+    } else {
+      for (const group of groups) {
+        const dimensions = group.members.map((id) => definition.dimensions.find((r) => r.itemId === id)?.definition);
+        if (dimensions.some((d) => !d)) throw new Error(`${group.name}：维度来源缺失。`);
+        modes.push(compileMode(ref.definition, dimensions, ref.metricKeys, group));
+      }
+    }
+  }
+  if (!modes.length) throw new Error("本次没有已配置的取数任务。");
+  return modes;
 }
 export function validateDimension(result, item) {
   if (result.truncated) throw new Error("维度超过 500 行本地上限，不能用截断映射关联。");
@@ -266,12 +301,14 @@ export function itemPublishIssues(item, context, scenario = "normal") {
   return issues;
 }
 export function publishItem(item, context, scenario) {
+  if (sourceType(item) !== "custom_sql" || item.archived) throw new Error("只有未归档的自定义 SQL 可以发布。");
   const issues = itemPublishIssues(item, context, scenario);
   if (issues.length) throw new Error(issues.join(" "));
-  const version = { number: item.versions.length + 1, publishedAt: now(), definition: itemDefinition(item), runId: itemCurrentRun(item, context).id };
+  const version = { number: item.versions.length + 1, publishedAt: now(), operator: currentActor, operation: "发布 SQL", definition: itemDefinition(item), runId: itemCurrentRun(item, context).id };
   item.versions.push(version); item.keyLocked = true; return version;
 }
 export function attachItem(store, item, ability, number) {
+  if (item.archived || ability.archived) throw new Error("已归档对象不能新增关联。");
   if (!number && item.ownerAbilityId && item.ownerAbilityId !== ability.id) throw new Error("能力内草稿需先独立发布，才能被其他能力组复用。");
   if (number && !item.versions.some((v) => v.number === number)) throw new Error("需要选择已发布的取数项版本。");
   const collection = item.kind === "metric" ? ability.metrics : ability.dimensions;
@@ -281,10 +318,12 @@ export function attachItem(store, item, ability, number) {
   collection.push({ itemId: item.id, version: number, ...(item.kind === "metric" ? {
     metricKeys: definition.draft.fields.filter((f) => f.role === "metric").map((f) => f.key)
   } : {}) });
-  if (item.kind === "dimension") ability.groups.push({ id: uid("drill"), name: definition.draft.dimensionName, cross: false, members: [item.id] });
+  if (item.kind === "dimension") ability.groups.push(completeGroup({ id: uid("drill"), name: definition.draft.dimensionName, cross: false, members: [item.id] }));
+  syncQueryGroups(store, ability);
   return ability;
 }
 export async function runAbility(store, ability, changed = () => {}) {
+  syncQueryGroups(store, ability);
   const record = { id: uid("abilityrun"), startedAt: now(), status: "running", signature: abilityQuerySignature(store, ability),
     context: clone(ability.context), scenario: ability.scenario, records: [], modes: [], approvedFor: "", error: "" };
   const validation = abilityIssues(store, ability);
@@ -295,19 +334,14 @@ export async function runAbility(store, ability, changed = () => {}) {
     const definition = record.definition;
     failScenario(record.scenario);
     const context = record.scenario === "empty" ? { ...record.context, libra_id: "0" } : record.context;
-    const groups = [...(definition.includeOverall ? [{ id: "overall", name: "整体", members: [] }] : []), ...definition.groups];
-    for (const ref of definition.metrics.filter((r) => r.metricKeys.length)) {
-      for (const group of groups) {
-        const dimensions = group.members.map((id) => definition.dimensions.find((r) => r.itemId === id).definition);
-        const mode = compileMode(ref.definition, dimensions, ref.metricKeys, group);
+    for (const mode of abilityModes(store, definition)) {
         const entry = { id: uid("dataset"), modeId: mode.id, modeName: mode.name, snapshot: clone(mode), status: "running", context: clone(record.context), checks: [] };
         record.records.push(entry); record.modes.push(mode); changed();
-        entry.checks = await verifyAssociations(ref.definition, dimensions, context);
+        entry.checks = await verifyAssociations(mode.sourceDefinitions[0], mode.sourceDefinitions.slice(1), context);
         const result = await sqlQuery({ sql: mode.sql, bindings: mode.parameters, context });
         alterResult(result, mode, record.scenario);
-        Object.assign(entry, normalize(result, mode, entry.id, record.context, ref.metricKeys), { renderedSql: result.rendered });
+        Object.assign(entry, normalize(result, mode, entry.id, record.context), { renderedSql: result.rendered });
         entry.status = entry.rawRows.length ? "success" : "empty"; changed();
-      }
     }
     record.status = record.records.every((r) => r.status === "success") ? "success" : "empty";
   } catch (error) {
@@ -317,7 +351,9 @@ export async function runAbility(store, ability, changed = () => {}) {
   record.finishedAt = now(); changed(); return record;
 }
 export function abilityPublishIssues(store, ability) {
+  syncQueryGroups(store, ability);
   const issues = abilityIssues(store, ability), run = abilityCurrentRun(store, ability);
+  if (ability.archived) issues.push("已归档能力不能发布新版本。");
   if (ability.scenario !== "normal") issues.push("恢复正常场景并重新整体试跑后发布。");
   if (!run) issues.push("当前能力的全部整体与下钻组合需要完成非空试跑。");
   else if (run.approvedFor !== abilitySignature(store, ability)) issues.push("请核对当前能力的全部取数结果。");
@@ -328,14 +364,10 @@ export function publishAbility(store, ability) {
   if (issues.length) throw new Error(issues.join(" "));
   const run = abilityCurrentRun(store, ability);
   const definition = abilityDefinition(store, ability);
-  const modes = [];
-  const groups = [...(definition.includeOverall ? [{ id: "overall", name: "整体", members: [] }] : []), ...definition.groups];
-  for (const ref of definition.metrics.filter((r) => r.metricKeys.length)) {
-    for (const group of groups) modes.push(compileMode(ref.definition, group.members.map((id) => definition.dimensions.find((r) => r.itemId === id).definition), ref.metricKeys, group));
-  }
+  const modes = abilityModes(store, ability);
   const version = {
     number: ability.versions.length + 1, abilityId: ability.id, name: ability.name,
-    publishedAt: now(), definition, modes, runId: run.id
+    publishedAt: now(), operator: currentActor, operation: "发布取数能力", definition, modes, runId: run.id
   };
   ability.versions.push(version); ability.keyLocked = true; return version;
 }
@@ -343,6 +375,7 @@ export function useVersion(store, ability, number) {
   const version = ability.versions.find((v) => v.number === number);
   if (!version) throw new Error("能力版本不存在。");
   const m = store.analysis;
+  if (ability.archived && (m.capabilityId !== ability.id || m.version !== number)) throw new Error("已归档能力不能新增分析引用。");
   if (m.capabilityId !== ability.id || m.version !== number) {
     m.selections = Object.fromEntries(version.modes.map((mode) => [mode.id, mode.fields.filter((f) => f.role === "metric").map((f) => f.key)]));
   }

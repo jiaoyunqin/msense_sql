@@ -1,10 +1,16 @@
-import { clone, uid, hash, definitions, defaultContext } from "./prototype-data.js";
+import { clone, uid, hash, definitions, defaultContext, parameterCatalog } from "./prototype-data.js";
 import demoFixture from "./composer-demo.json";
 
 export { clone, uid, hash, defaultContext };
 export const COMPOSER_KEY = "msense-composer-v2";
 export const identifier = (value) => /^[a-zA-Z_]\w*$/.test(value || "");
 export const slots = ["dimension_select", "dimension_join", "dimension_group"];
+export const currentActor = "sheriqin.01";
+export const businessGoals = ["平台老客提频", "新客转化", "用户召回"];
+// Older fixture snapshots predate source metadata; keep their known RPC origin.
+export const sourceType = (obj) => obj.id === "preset-summary-only" ? "builtin_rpc" : obj.sourceType || (obj.unavailable ? "builtin_rpc" : obj.preset ? "builtin_sql" : "custom_sql");
+export const outputDimensions = (item) => item.draft.fields.filter((f) => f.role === "dimension");
+export const directQuery = (item) => item.kind === "metric" && !hasDrillSlots(item);
 export const entities = { user: { name: "用户", column: "user_id" }, order: { name: "订单", column: "order_id" } };
 export const dimensionSQL = {
   spend_tier: `SELECT user_id AS entity_id,
@@ -47,7 +53,8 @@ export function newItem(kind = "metric", ownerAbilityId = "") {
   return {
     id: uid("item"), key: uid(isDimension ? "dimension" : "query"), name: isDimension ? "自定义消费分层" : "自定义订单表现",
     description: isDimension ? "按用户历史消费金额定义分层，取自实验前示例用户快照。" : "观察支付表现；指标由 SQL 直接计算。",
-    kind, ownerAbilityId, preset: false, keyLocked: false, savedAt: "", versions: [], runs: [],
+    kind, ownerAbilityId, preset: false, sourceType: "custom_sql", archived: false,
+    keyLocked: false, savedAt: "", versions: [], runs: [],
     draft: {
       sql: isDimension ? dimensionSQL.spend_tier.replace("AS dimension_value", "AS spend_tier") : metricSQL(),
       entity: "user", entityColumn: "user_id", sourceAlias: "s",
@@ -63,7 +70,7 @@ export function newItem(kind = "metric", ownerAbilityId = "") {
 export function itemDefinition(item) {
   return clone({
     id: item.id, key: item.key, name: item.name, description: item.description,
-    kind: item.kind, preset: item.preset, unavailable: item.unavailable || "",
+    kind: item.kind, preset: item.preset, sourceType: sourceType(item), unavailable: item.unavailable || "",
     draft: item.draft
   });
 }
@@ -87,7 +94,7 @@ export function makeReference(item, version = item.versions.at(-1)?.number || 0)
 
 function preset(kind, id, name, sql, options = {}) {
   const item = newItem(kind);
-  Object.assign(item, { id, key: id.replaceAll("-", "_"), name, description: options.description || name, preset: true, keyLocked: true });
+  Object.assign(item, { id, key: id.replaceAll("-", "_"), name, description: options.description || name, preset: true, sourceType: "builtin_sql", keyLocked: true });
   Object.assign(item.draft, { sql, parsedSql: sql, ...options });
   if (kind === "metric") {
     item.draft.fields = ["group_id", "group_name", "is_control", ...options.metrics].map((alias) => field(alias,
@@ -113,14 +120,14 @@ export function presetItems() {
       { dimensionKey: "lifecycle", dimensionName: "生命周期", description: definitions.lifecycle.description }),
     preset("dimension", "preset-city", "城市 ID", dimensionSQL.city_id,
       { dimensionKey: "city_id", dimensionName: "城市 ID", valueType: "number", description: definitions.city_id.description }),
-    { ...preset("metric", "preset-summary-only", "仅汇总 RPC 指标", "SELECT 1 AS unavailable", { metrics: [] }),
+    { ...preset("metric", "preset-summary-only", "仅汇总 RPC 指标", "SELECT 1 AS unavailable", { metrics: [] }), sourceType: "builtin_rpc",
       unavailable: "仅有组别汇总，没有明细来源或可下钻执行器；不能附加 SQL 维度后生成下钻。" }
   ];
 }
 export function newAbility(name = "未命名取数能力") {
   return {
     id: uid("ability"), key: uid("capability"), keyLocked: false, name,
-    goal: "平台老客提频", owner: "DS / 分析师", description: "",
+    goal: "平台老客提频", owner: currentActor, description: "", sourceType: "custom_sql", archived: false,
     metrics: [], dimensions: [], groups: [], includeOverall: true,
     context: clone(defaultContext), scenario: "normal", savedAt: "", runs: [], versions: []
   };
@@ -152,6 +159,7 @@ function addPublishedDemo(store) {
   return store;
 }
 export function loadComposer() {
+  let store;
   try {
     const saved = JSON.parse(localStorage.getItem(COMPOSER_KEY));
     if (saved?.schema === 2 && Array.isArray(saved.items) && Array.isArray(saved.abilities)) {
@@ -163,13 +171,51 @@ export function loadComposer() {
         d.enumEdited ??= false;
         d.enumValues ??= [];
       }
-      return addPublishedDemo(saved);
+      store = saved;
     }
   } catch { /* Storage failure must not make the page unusable. */ }
-  return addPublishedDemo(initialStore());
+  store = addPublishedDemo(store || initialStore());
+  for (const obj of [...store.items, ...store.abilities]) {
+    obj.sourceType ||= obj.unavailable ? "builtin_rpc" : obj.preset ? "builtin_sql" : "custom_sql";
+    obj.archived ??= false;
+    obj.keyLocked ||= Boolean(obj.savedAt || obj.versions.length);
+    obj.updatedAt ||= obj.savedAt || obj.versions.at(-1)?.publishedAt || "";
+  }
+  for (const ability of store.abilities) {
+    if (ability.owner === "DS / 分析师") ability.owner = currentActor;
+    for (const group of ability.groups) completeGroup(group);
+    syncQueryGroups(store, ability);
+  }
+  return store;
 }
 export function hasDrillSlots(item) {
   return slots.every((slot) => item.draft.sql.includes(`{{${slot}}}`));
+}
+export function completeGroup(group) {
+  group.key ||= `drill_${group.id.replace(/\W/g, "_")}`;
+  group.description ??= "";
+  return group;
+}
+// A full query owns its actual output grain. Register that grain once rather
+// than applying the same aggregate query to unrelated mapping-based groups.
+export function syncQueryGroups(store, ability) {
+  const live = new Set();
+  for (const ref of ability.metrics) {
+    let query;
+    try { query = resolveItem(store, ref); } catch { continue; }
+    if (!directQuery(query)) continue;
+    const dims = outputDimensions(query);
+    if (!dims.length) continue;
+    live.add(query.id);
+    let group = ability.groups.find((g) => g.queryItemId === query.id);
+    if (!group) {
+      group = completeGroup({ id: uid("drill"), queryItemId: query.id, name: dims.map((f) => f.name).join(" × "), members: [], cross: false });
+      ability.groups.push(group);
+    }
+    group.members = dims.map((f) => f.key);
+    group.cross = dims.length > 1;
+  }
+  ability.groups = ability.groups.filter((g) => !g.queryItemId || live.has(g.queryItemId));
 }
 export function itemQuerySignature(item, context) {
   const d = item.draft;
@@ -205,7 +251,7 @@ export function abilityQuerySignature(store, ability) {
       metrics: ability.metrics.map((ref) => ({ itemId: ref.itemId, version: ref.version, metricKeys: ref.metricKeys, query: itemQuerySignature(resolveItem(store, ref), ability.context) })),
       dimensions: ability.dimensions.map((ref) => ({ itemId: ref.itemId, version: ref.version, query: itemQuerySignature(resolveItem(store, ref), ability.context) })),
       includeOverall: ability.includeOverall,
-      groups: ability.groups.map(({ id, cross, members }) => ({ id, cross, members })),
+      groups: ability.groups.map(({ id, cross, members, queryItemId }) => ({ id, cross, members, ...(queryItemId ? { queryItemId } : {}) })),
       context: ability.context, scenario: ability.scenario
     });
   } catch { return "invalid-reference"; }
@@ -222,7 +268,12 @@ export function itemIssues(item) {
   if (!d.sql.trim() || d.parsedSql !== d.sql || d.parseError) errors.push("当前 SQL 需要成功解析。");
   if (d.removed.length) errors.push("有删除或重命名输出需要确认。");
   if (d.fields.some((f) => f.review)) errors.push("来源或粒度变化，需要复核相关输出。");
-  for (const p of d.parameters) if (!p.source) errors.push(`参数 \${${p.name}} 未绑定。`);
+  for (const p of d.parameters) {
+    const source = parameterCatalog.find((candidate) => candidate.key === p.source);
+    if (!source) errors.push(`参数 \${${p.name}} 未绑定。`);
+    else if (source.type !== p.expectedType) errors.push(`参数 \${${p.name}} 类型与来源不匹配。`);
+    if (p.expectedType?.endsWith("_list") && !p.listUsage) errors.push(`列表参数 \${${p.name}} 须用于 IN (...)。`);
+  }
   if (item.kind === "dimension") {
     if (!identifier(d.dimensionKey) || ["group_id", "group_name", "is_control"].includes(d.dimensionKey)) errors.push("维度 Key 不合法或与分组字段冲突。");
     if (!d.dimensionName.trim() || !d.timing.trim()) errors.push("补齐维度名称与取值时点。");
@@ -233,20 +284,23 @@ export function itemIssues(item) {
     if ((d.enumValues || []).some((value) => value !== null && typeof value !== d.valueType)) errors.push("枚举候选值须符合维度原生类型，数字枚举请填写数字。");
   } else {
     const metrics = d.fields.filter((f) => f.role === "metric");
-    if (d.fields.some((f) => f.role === "dimension")) errors.push("指标取数项提供整体最终指标；新增业务维度请定义为维度取数项后组合。");
+    if (hasDrillSlots(item) && outputDimensions(item).length) errors.push("含维度输出的完整 SQL 请移除模板位置；维度按实际输出声明。");
     if (!metrics.length) errors.push("至少定义一个 SQL 最终指标。");
     if (new Set(d.fields.map((f) => f.key)).size !== d.fields.length) errors.push("输出 Key 重复。");
     for (const f of d.fields) {
       if (!identifier(f.key) || !f.name.trim() || !f.description.trim() || f.role === "pending" || f.type === "unknown") errors.push(`${f.alias}：补齐 Key、名称、口径、角色与类型。`);
+      if (f.role === "metric" && (!["decimal", "currency", "integer", "percent"].includes(f.format) || !Number.isInteger(Number(f.precision)) || Number(f.precision) < 0 || Number(f.precision) > 6)) errors.push(`${f.alias}：选择有效展示格式与 0–6 位精度。`);
     }
     for (const alias of ["group_id", "group_name", "is_control"]) if (!d.fields.some((f) => f.alias === alias && f.key === alias && f.role === "identity")) errors.push(`缺少分组身份映射 ${alias}。`);
-    if (!identifier(d.sourceAlias) || !identifier(d.entityColumn)) errors.push("明细来源别名和关联字段须为有效标识。");
+    if (hasDrillSlots(item) && (!identifier(d.sourceAlias) || !identifier(d.entityColumn))) errors.push("明细来源别名和关联字段须为有效标识。");
   }
   return errors;
 }
 export function abilityIssues(store, ability) {
   const errors = [];
   if (!ability.name.trim() || !ability.description.trim() || !ability.owner.trim()) errors.push("补齐能力名称、负责人和说明。");
+  if (!businessGoals.includes(ability.goal)) errors.push("请选择平台已有业务目标。");
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(ability.owner)) errors.push("负责人填写用户邮箱前缀。");
   if (!identifier(ability.key) || store.abilities.some((a) => a.id !== ability.id && a.key === ability.key)) errors.push("能力 Key 格式不合法或重复。");
   if (!ability.metrics.length || !ability.metrics.some((r) => r.metricKeys.length)) errors.push("至少选择一个实际指标。");
   if (!ability.includeOverall && !ability.groups.length) errors.push("至少保留整体或一个下钻组。");
@@ -261,12 +315,24 @@ export function abilityIssues(store, ability) {
     } catch (error) { errors.push(error.message); }
   }
   if (new Set(dimKeys).size !== dimKeys.length) errors.push("维度 Key 重复，不能区分成员来源。");
+  if (new Set(ability.groups.map((g) => completeGroup(g).key)).size !== ability.groups.length) errors.push("下钻组 Key 重复。");
   for (const group of ability.groups) {
+    if (!identifier(completeGroup(group).key)) errors.push(`${group.name}：下钻 Key 不合法。`);
+    if (group.queryItemId) {
+      const ref = ability.metrics.find((r) => r.itemId === group.queryItemId && r.metricKeys.length);
+      if (!ref) continue;
+      try {
+        const query = resolveItem(store, ref), dims = outputDimensions(query);
+        if (!directQuery(query) || !group.name.trim() || group.members.length !== dims.length || group.members.some((key) => !dims.some((f) => f.key === key)) || new Set(group.members).size !== group.members.length || group.cross !== (dims.length > 1)) errors.push(`${group.name}：成员与绑定 SQL 的实际维度输出不匹配。`);
+      } catch (error) { errors.push(error.message); }
+      continue;
+    }
     if (!group.name.trim() || group.members.length !== new Set(group.members).size || group.members.some((id) => !ability.dimensions.some((d) => d.itemId === id))) errors.push(`${group.name || "下钻组"}：成员缺失、重复或尚未加入维度配置。`);
     if (group.cross ? group.members.length < 2 : group.members.length !== 1) errors.push(`${group.name}：单维选择一个成员，交叉至少选择两个不同成员。`);
     for (const ref of ability.metrics.filter((r) => r.metricKeys.length)) {
       try {
         const item = resolveItem(store, ref);
+        if (directQuery(item)) continue;
         if (!hasDrillSlots(item)) errors.push(`${item.name}：没有可下钻的 SQL 模板位置，只支持实际整体输出。`);
         for (const id of group.members) {
           const dimRef = ability.dimensions.find((d) => d.itemId === id);
