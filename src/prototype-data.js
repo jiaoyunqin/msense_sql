@@ -8,12 +8,12 @@ export const hash = (value) => {
 };
 
 export const parameterCatalog = [
-  { key: "libra_id", name: "Libra 实验 ID", type: "number", value: "4823214", description: "本地示例实验编号；与钱效实验 ID 分开。" },
-  { key: "pgdp_experiment_id", name: "钱效实验 ID", type: "string", value: "pgdp_demo_01", description: "示例与 Libra 一对一对应；不会自动替代 Libra ID。" },
+  { key: "libra_id", name: "Libra 实验 ID", type: "number", value: "4823214", description: "Libra 平台的实验编号。" },
+  { key: "pgdp_experiment_id", name: "钱效实验 ID", type: "string", value: "pgdp_demo_01", description: "钱效平台的实验编号。" },
   { key: "start_date", name: "观察开始日期", type: "date", value: "2026-10-01", description: "本次观察窗口起点，YYYY-MM-DD；不是实验开始日期。" },
   { key: "end_date", name: "观察结束日期", type: "date", value: "2026-10-03", description: "本次观察窗口终点，YYYY-MM-DD；包含当日。" },
   { key: "coupon_meta_ids", name: "券模板 ID 列表", type: "number_list", value: "101,102", description: "非空数字列表，在 SQL 中使用 IN (${coupon_meta_ids})。" },
-  { key: "versionIds", name: "实验版本 ID 列表", type: "number_list", value: "1,2", description: "示例对照组与实验组版本编号，使用 IN (...)。" }
+  { key: "versionIds", name: "实验版本 ID 列表", type: "number_list", value: "1,2", description: "对照组与实验组版本编号，使用 IN (...)。" }
 ];
 export const defaultContext = Object.fromEntries(parameterCatalog.map((p) => [p.key, p.value]));
 export const scenarios = {
