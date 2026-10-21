@@ -1,0 +1,9 @@
+.git/
+node_modules/
+dist/
+deliverables/
+doc-fetch-resources/
+.trae/
+.trae-html-share-packages/
+.DS_Store
+.env*
