@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.vercel/
+.DS_Store
+.env
+.env.*
+!.env.example
+deliverables/
+doc-fetch-resources/
+.trae-html-share-packages/
+.vercel
+.env*
