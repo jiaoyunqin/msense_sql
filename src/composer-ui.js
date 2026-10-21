@@ -5,7 +5,7 @@ import {
   abilityCurrentRun, abilitySignature, abilityQuerySignature, defaultContext,
   outputDimensions, directQuery, syncQueryGroups, completeGroup, sourceType, currentActor, businessGoal
 } from "./composer-data.js";
-import { parameterCatalog, scenarios, formatValue, sampleSQL } from "./prototype-data.js";
+import { parameterCatalog, scenarios, formatValue } from "./prototype-data.js";
 import {
   sourceLabels, stateLabels, publicationState, matchesState, trackChanges,
   assertMutable, saveDraft, keyImpact, setArchived
@@ -14,6 +14,7 @@ import {
   parseItem, syncDimension, runItem, publishItem, itemPublishIssues, attachItem, runAbility,
   publishAbility, abilityPublishIssues, useVersion, runAnalysis, abilityModes
 } from "./composer-engine.js";
+import { configTypes, captureConfig, configSummary, saveConfig, instantiateConfig } from "./retrieval-configs.js";
 import "./prototype.css";
 import "./composer.css";
 
@@ -43,40 +44,40 @@ function table(record, highlight = -1) {
   if (!record?.rawRows?.length) return `<div class="p-empty">${icon("table-2")}<p>${record?.status === "empty" ? "本次执行返回 0 行，请核对筛选条件。" : "本次尚无可用数据。"}</p></div>`;
   return `<div class="p-table-scroll"><table class="p-table"><thead><tr><th>行</th>${record.fields.map((f) => `<th>${esc(f.name)}<small>${esc(f.key)}</small></th>`).join("")}</tr></thead><tbody>${record.rawRows.map((r, i) => `<tr id="evidence-${i}" class="${i === highlight ? "evidence-row" : ""}"><td>${i + 1}</td>${record.fields.map((f) => `<td title="原值：${esc(r[f.alias] === null ? "NULL" : r[f.alias])}">${esc(formatValue(r[f.alias], f, r))}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
 }
-const section = (title, desc, body, actions = "", id = "") => `<section class="p-section" ${id ? `id="${id}"` : ""}><header><div><h2>${title}</h2><p>${desc}</p></div><div class="p-actions">${actions}</div></header>${body}</section>`;
+const section = (title, desc, body, actions = "", id = "") => `<section class="p-section" ${id ? `id="${id}"` : ""}><header><div><h2>${title}</h2>${desc ? `<p>${desc}</p>` : ""}</div><div class="p-actions">${actions}</div></header>${body}</section>`;
 
-export function mountComposer({ capabilities, showToast }) {
+export function mountComposer({ capabilities, showToast, applyPresetSelection }) {
   const store = loadComposer(), main = document.querySelector(".main-content"), catalog = document.querySelector(".capability-page");
   const outlet = document.createElement("section"); outlet.className = "prototype-outlet"; main.append(outlet);
   const overlay = document.createElement("div"); overlay.className = "p-overlay"; overlay.hidden = true; document.querySelector(".app-shell").append(overlay);
   let ability, item, issues = [], busy = false, fieldDraft, pickerKind = "", dialogKind = "", previousFocus, selectedRecord = "", selectedRun = "", highlight = -1, analysisTab = "output", trialKind = "", attachDraft;
   let parameterOpen = false, parameterSearch = "", librarySearch = "", librarySource = "all", libraryState = "all";
   let catalogSource = "all", catalogState = "all", pendingArchive;
+  let presetId = "", presetResult = "", configSearch = "", configDraft;
+  let publishFailure = false;
   const parseTimers = new Map(), parsing = new Map();
   let parseSequence = 0;
   const persist = () => {
     trackChanges(store);
-    try { localStorage.setItem(COMPOSER_KEY, JSON.stringify(store)); }
-    catch { showToast("本地存储已满或不可用，请导出当前工作区保存。"); }
+    try { localStorage.setItem(COMPOSER_KEY, JSON.stringify(store)); return true; }
+    catch { showToast("本地存储已满或不可用，请导出当前工作区保存。"); return false; }
   };
   for (const obj of [...store.items, ...store.abilities]) {
     obj.runs.forEach((r) => { if (r.status === "running") { r.status = "failed"; r.error = "页面重载中断了本地任务，请重新运行。"; } });
   }
   store.analysis.attempts.forEach((a) => { if (a.status === "running") { a.status = "insufficient"; a.error = "页面重载中断了本地分析，请重新试跑。"; } });
   persist();
+  for (const [id, selection] of Object.entries(store.presetDrafts)) applyPresetSelection(id, selection);
   const catalogActions = document.createElement("div"); catalogActions.className = "p-catalog-actions p-actions";
-  catalogActions.innerHTML = btn("workflow-guide", "配置流程", "route") + btn("new-ability", "新建取数能力", "plus", "primary");
+  catalogActions.innerHTML = btn("workflow-guide", "配置流程", "route") + btn("config-load", "载入已有取数配置", "folder-open") + btn("new-ability", "新建取数能力", "plus", "primary");
   catalog.querySelector(".capability-count").before(catalogActions);
-  const notice = document.createElement("div"); notice.className = "p-notice";
-  notice.innerHTML = `${icon("info")}<span>第一次体验可以打开“优惠券支付分析 · 完整示例”，已有解析字段、取数结果和分析记录。${btn("demo-fields", "看解析字段", "", "link")}${btn("demo-results", "看试跑结果", "", "link")}${btn("demo-analysis", "看分析输出", "", "link")}</span>`;
-  catalog.querySelector(".catalog-toolbar").after(notice);
   const filters = document.createElement("div"); filters.className = "c-catalog-filters";
   filters.innerHTML = select("来源", "catalog-source", [["all", "全部来源"], ...Object.entries(sourceLabels).map(([k, [label]]) => [k, label])], "all")
     + select("状态", "catalog-state", Object.entries(stateLabels), "all");
   catalog.querySelector(".catalog-toolbar").append(filters);
   catalog.querySelector(".business-control").innerHTML = `<span class="c-fixed-goal">${esc(businessGoal)}</span>`;
   const catalogTools = document.createElement("details"); catalogTools.className = "c-catalog-tools";
-  catalogTools.innerHTML = `<summary>SQL 复用管理</summary><p>能力内新建的 SQL 随能力组管理；需要独立发布、跨组复用时再进入 SQL 库。</p>${btn("item-library", "管理可复用 SQL", "code-2")}${btn("sample-info", "示例数据说明", "info")}`;
+  catalogTools.innerHTML = `<summary>SQL 复用管理</summary>${btn("item-library", "管理可复用 SQL", "code-2")}`;
   catalog.append(catalogTools);
   function refreshIcons() { createIcons({ icons }); }
   function sourceBadge(obj) {
@@ -116,21 +117,19 @@ export function mountComposer({ capabilities, showToast }) {
     document.querySelector(".capability-count").innerHTML = `${icon("database")}${capabilities.length + store.abilities.length} 项能力`; refreshIcons();
   }
   function header(title, desc, actions, parent = "取数能力", href = "#/capabilities") {
-    return `<div class="p-breadcrumb"><a href="${href}">${parent}</a>${icon("chevron-right")}<span>${esc(title)}</span>${badge("本地模拟", "blue")}</div><header class="p-page-header"><div><h1>${esc(title)}</h1><p>${desc}</p></div><div class="p-actions">${actions}</div></header>`;
+    return `<div class="p-breadcrumb"><a href="${href}">${parent}</a>${icon("chevron-right")}<span>${esc(title)}</span></div><header class="p-page-header"><div><h1>${esc(title)}</h1>${desc ? `<p>${desc}</p>` : ""}</div><div class="p-actions">${actions}</div></header>`;
+  }
+  function configToolbar() {
+    return `<div class="c-config-toolbar"><span>复用取数配置</span><div class="p-actions">${btn("config-load", "载入已有取数配置", "folder-open", "", busyAttr(busy))}${btn("config-save", "保存取数配置", "bookmark-plus")}</div></div>`;
   }
   function workflowSteps(current) {
     return `<nav class="c-workflow" aria-label="DS 配置流程">${[["ability", "1", "配置能力"], ["sql", "2", "编写与解析 SQL"], ["trial", "3", "试跑与发布"], ["analysis", "4", "分析应用"]].map(([key, step, label]) => `<span class="${current === key ? "current" : ""}"><b>${step}</b>${label}</span>`).join("")}${btn("workflow-guide", "完整说明", "", "link")}</nav>`;
   }
   function renderGuide() {
-    outlet.innerHTML = header("DS 自定义 SQL 配置流程", "从一个取数能力开始，将指标、维度和 SQL 保存在同一组内。", btn("new-ability", "开始新建能力", "plus", "primary"), "取数能力", "#/capabilities")
-      + section("先体验已发布示例", "示例已带解析字段、成功取数结果和分析输出，不需要先填写配置。",
-        `<div class="c-guide-example"><strong>优惠券支付分析 · 完整示例</strong><p>支付 GMV、订单量、平均订单金额；SQL 消费分层与生命周期；整体 + 两个单维 + 一个交叉，共 4 份取数结果。</p><div class="p-actions">${btn("demo-fields", "1. 看 SQL 和解析字段", "code-2")}${btn("demo-results", "2. 看试跑结果", "table-2")}${btn("demo-analysis", "3. 看分析输出", "file-text")}</div></div>`)
-      + section("实际配置与发布", "正常路径不需要先到 SQL 库单独发布。",
-        `<ol class="c-guide-steps"><li><strong>打开已有能力，或新建取数能力</strong><p>填写能力名称和说明，业务目标固定为平台老客提频。系统在首次保存时生成稳定 Key，保存后只读展示。</p></li><li><strong>在“指标”中新建 SQL</strong><p>先查看“可用参数”，编写 SQL；可同时输出指标与维度。解析后确认角色、名称、Key、类型和口径，点击“保存并返回能力组”。</p></li><li><strong>确认下钻维度与分组</strong><p>完整 SQL 的维度自动带入，并按实际输出形成单维或交叉结果。需要组合独立维度时，可选择已有维度或新建实体映射 SQL；独立组分别取数，交叉组联合取数。</p></li><li><strong>保存配置，整体试跑并核对</strong><p>点击“整体试跑”，输入实验 ID 与观测时间，获取数据，逐一查看已配置结果并勾选核对。</p></li><li><strong>发布取数能力</strong><p>发布固定整个组的 SQL、指标、维度、参数及下钻定义。能力内 SQL 无须先独立发布。</p></li><li><strong>用于分析，配置分析思路并试跑</strong><p>选择已发布的能力版本，选择实际指标与模式，填写分析思路和注意事项，点击“分析试跑”，查看结论并跳转数据证据。</p></li></ol>`)
-      + section("已有能力与 SQL 复用", "SQL 库是可选管理入口。",
-        `<p class="c-guide-copy">已有可编辑能力直接进入“配置指标与 SQL”。需要跨多个能力复用同一 SQL 时，才走“独立 SQL → 独立试跑 → 核对并发布 SQL → 关联已有或新建能力”。普通配置只需在能力内编辑，随能力统一发布。</p>`)
-      + section("发布上线分别指什么", "页面能力发布和站点部署是两件独立的操作。",
-        `<p class="c-guide-copy">DS 发布能力后，分析模块可引用该版本；当前原型把配置与版本保存在这个浏览器。GitHub 推送 main 后，Vercel 自动部署页面，供你查看最新交互。生产环境还需接入真实取数、权限、版本注册与分析服务，才能完成业务上线。</p><p class="c-guide-copy">如果看到截图中的旧离线页面，请打开最新在线地址继续体验。迭代完成后再统一导出。</p>`);
+    outlet.innerHTML = header("使用说明", "", btn("new-ability", "新建取数能力", "plus", "primary"))
+      + section("配置与发布", "",
+        `<ol class="c-guide-steps"><li><strong>新建取数能力</strong><p>填写能力名称和说明。</p></li><li><strong>编写并解析 SQL</strong><p>在“指标”中点击“新建 SQL”。可通过“可用参数”插入入参，解析后确认指标、维度及字段口径，再保存返回能力组。</p></li><li><strong>确认下钻分组</strong><p>检查 SQL 输出的维度；独立组分别取数，交叉组联合取数。其他粒度需提供对应 SQL。</p></li><li><strong>试跑与发布</strong><p>点击“整体试跑”，填写实验 ID 和观测时间，获取数据并核对结果，确认后发布能力。</p></li><li><strong>用于分析</strong><p>选择已发布的能力版本，填写分析思路，点击“分析试跑”；可从结论查看对应数据证据。</p></li></ol>`)
+      + section("跨能力复用 SQL", "", `<p class="c-guide-copy">在 SQL 复用库中独立试跑并发布 SQL，再关联到其他能力组。</p>${btn("item-library", "打开 SQL 复用库", "code-2")}`);
     refreshIcons();
   }
   function itemContext() { return item.context || defaultContext; }
@@ -144,7 +143,7 @@ export function mountComposer({ capabilities, showToast }) {
   }
   function versionsHTML(obj, type) {
     return obj.versions.length ? obj.versions.slice().reverse().map((v) =>
-      `<div class="p-version"><div><strong>v${v.number} · ${esc(v.definition.name)}</strong>${badge(v.fixture ? "预设示例" : "已发布 · 本地", "green")}<span>${date(v.publishedAt)}</span><small>${esc(v.operation || (v.fixture ? "预设版本" : "发布"))} · ${esc(v.operator || "历史操作人未记录")} · ${type === "ability" ? `${v.modes.length} 份 Dataset` : "完整 SQL 定义"}</small></div><div class="p-actions">${btn("view-version", "查看快照", "file-code", "", `data-type="${type}" data-number="${v.number}"`)}${btn(type === "ability" ? "use-version" : "attach", type === "ability" ? "用于分析" : "关联取数能力组", "arrow-up-right", "", `data-number="${v.number}" ${obj.archived ? "disabled" : ""}`)}</div></div>`
+      `<div class="p-version"><div><strong>v${v.number} · ${esc(v.definition.name)}</strong>${badge(v.fixture ? "预设版本" : "已发布", "green")}<span>${date(v.publishedAt)}</span><small>${esc(v.operation || (v.fixture ? "预设版本" : "发布"))} · ${esc(v.operator || "历史操作人未记录")} · ${type === "ability" ? `${v.modes.length} 份结果` : "SQL 定义"}</small></div><div class="p-actions">${btn("view-version", "查看快照", "file-code", "", `data-type="${type}" data-number="${v.number}"`)}${btn(type === "ability" ? "use-version" : "attach", type === "ability" ? "用于分析" : "关联取数能力组", "arrow-up-right", "", `data-number="${v.number}" ${obj.archived ? "disabled" : ""}`)}</div></div>`
     ).join("") : `<p class="p-muted">暂无发布版本。</p>`;
   }
   function sourceCards(kind) {
@@ -176,16 +175,16 @@ export function mountComposer({ capabilities, showToast }) {
     });
     outlet.innerHTML = header(ability.name, "配置指标、下钻维度与独立分组，整体试跑后发布给分析模块。",
       btn("save", "保存草稿", "save") + btn("validate", "校验配置", "list-checks") + btn("ability-context", "整体试跑", "play", "primary", busyAttr(busy)) + btn("publish-ability", "发布能力", "upload", "", busyAttr(busy)))
-      + workflowSteps("ability") + statusBar() + issuesHTML(issues)
-      + section("基础信息", "用于能力目录展示与分析模块关联。", `<div class="p-form-grid two">${input("能力名称", "ability.name", ability.name)}${readonlyField("业务目标", businessGoal)}</div>${keyField(ability)}${area("能力说明", "ability.description", ability.description)}`)
-      + section("指标", "每个指标来源可输出多个最终指标；按本次所选粒度直接执行 SQL。", sourceCards("metric"),
+      + configToolbar() + workflowSteps("ability") + statusBar() + issuesHTML(issues)
+      + section("基础信息", "", `<div class="p-form-grid two">${input("能力名称", "ability.name", ability.name)}${readonlyField("业务目标", businessGoal)}</div>${keyField(ability)}${area("能力说明", "ability.description", ability.description)}`)
+      + section("指标", "", sourceCards("metric"),
         btn("pick-metric", "从已有指标库选择", "library") + btn("new-owned-metric", "新建 SQL", "plus", "primary"))
       + section("下钻维度", "完整 SQL 中的维度自动带入；也可选择已有维度或单独定义。", queryDimensionsHTML() + sourceCards("dimension"),
         btn("pick-dimension", "从已有维度库选择", "library") + btn("new-owned-dimension", "新建 SQL 维度", "plus", "primary"))
       + section("下钻分组", "多个独立组分别运行；开启交叉后计算该组的真实联合结果。",
         `<div class="c-overall">${hasOverall ? check("同时输出整体结果", "ability.includeOverall", ability.includeOverall) : '<p class="c-config-hint">当前 SQL 按已声明的维度取数；整体结果需添加对应 SQL。</p>'}</div>${groupsHTML()}`,
         ability.dimensions.length ? btn("add-single", "添加独立下钻组", "plus") + btn("add-cross", "添加交叉组", "git-merge") : "")
-      + section("取数验证", "在统一试跑面板核对整体和下钻数据，再发布用于分析。", `<div class="c-validation-entry"><span>${ability.runs.length ? `${statuses[ability.runs[0].status]} · ${date(ability.runs[0].startedAt)}` : "还没有试跑记录"}</span>${btn("ability-context", ability.runs.length ? "查看结果 / 重新试跑" : "进入取数验证", "arrow-up-right")}</div>`)
+      + section("取数验证", "", `<div class="c-validation-entry"><span>${ability.runs.length ? `${statuses[ability.runs[0].status]} · ${date(ability.runs[0].startedAt)}` : "还没有试跑记录"}</span>${btn("ability-context", ability.runs.length ? "查看结果 / 重新试跑" : "进入取数验证", "arrow-up-right")}</div>`)
       + section("发布记录", "已发布版本保持固定；修改草稿后需要重新整体试跑。", versionsHTML(ability, "ability"))
       + `<div class="c-page-more">${moreActions(ability, "ability")}</div>`;
     if (ability.archived) freezeForms();
@@ -198,7 +197,7 @@ export function mountComposer({ capabilities, showToast }) {
     });
   }
   function resultDetails(record) {
-    return `${table(record)}${record.checks?.length ? `<div class="c-associations">${record.checks.map((c) => badge(`${c.dimension}：${c.entities} 个实体 · 缺失 ${c.missing}`, "green")).join("")}</div>` : ""}<details class="p-snapshot"><summary>本次实际 SQL 与数据契约</summary><pre>${esc(record.renderedSql || "")}</pre><pre>${esc(JSON.stringify({ standard_dataset: record.dataset, prototype_adapter: record.adapter }, null, 2))}</pre></details>`;
+    return `${table(record)}${record.checks?.length ? `<div class="c-associations">${record.checks.map((c) => badge(`${c.dimension}：${c.entities} 个实体 · 缺失 ${c.missing}`, "green")).join("")}</div>` : ""}<details class="p-snapshot"><summary>查看执行 SQL</summary><pre>${esc(record.renderedSql || "")}</pre></details>`;
   }
   function abilityResults() {
     const run = ability.runs.find((r) => r.id === selectedRun) || ability.runs[0];
@@ -217,14 +216,13 @@ export function mountComposer({ capabilities, showToast }) {
   }
   function renderLibrary() {
     outlet.innerHTML = header("SQL 取数项", "SQL 指标和维度可以独立运行、核对、发布，再加入取数能力。",
-      btn("new-item-metric", "新建 SQL 指标", "plus", "primary") + btn("new-item-dimension", "新建 SQL 维度", "plus") + btn("export", "导出工作区", "download"))
+      btn("config-load", "载入已有取数配置", "folder-open") + btn("new-item-metric", "新建 SQL 指标", "plus", "primary") + btn("new-item-dimension", "新建 SQL 维度", "plus") + btn("export", "导出工作区", "download"))
       + `<div class="c-library-filters"><label class="search-field">${icon("search")}<input type="search" aria-label="搜索 SQL 名称或 Key" data-model="library-search" value="${esc(librarySearch)}" placeholder="搜索名称或 Key"></label>${select("来源", "library-source", [["all", "全部来源"], ...Object.entries(sourceLabels).map(([k, [label]]) => [k, label])], librarySource)}${select("状态", "library-state", Object.entries(stateLabels), libraryState)}</div><div class="p-custom-list" id="sql-library-list">${libraryRows()}</div>`;
     refreshIcons();
   }
   function editorHTML() {
     const d = item.draft;
-    return `<div class="c-sql-layout ${parameterOpen ? "parameters-open" : ""}"><div class="c-editor"><div class="p-editor-toolbar"><span>${icon("code-2")}SQL</span><div>${btn("toggle-parameters", "可用参数", "braces", "link", `aria-expanded="${parameterOpen}"`)}${check("自动解析", "draft.autoParse", d.autoParse !== false)}</div></div><div class="p-code"><pre class="p-line-numbers" aria-hidden="true">${d.sql.split("\n").map((_, i) => i + 1).join("\n")}</pre><div class="p-code-body"><pre class="p-code-highlight" aria-hidden="true">${syntax(d.sql)}</pre><textarea id="sql-editor" aria-label="SQL 编辑器" spellcheck="false" data-model="draft.sql">${esc(d.sql)}</textarea></div></div></div><aside class="c-parameter-catalog" id="parameter-catalog" ${parameterOpen ? "" : "hidden"}><header><strong>可用参数</strong>${btn("toggle-parameters", "收起", "x", "link")}</header><label class="search-field">${icon("search")}<input type="search" aria-label="搜索可用参数" data-model="parameter-search" value="${esc(parameterSearch)}" placeholder="搜索名称或 Key"></label><div id="parameter-catalog-list">${parameterRows()}</div><small>点击插入光标位置 · 本地上下文示例</small></aside></div><div id="sql-parse-tools">${parseToolsHTML()}</div>
-      <details class="p-snapshot"><summary>SQL 示例与输出约定</summary><p>${item.kind === "metric" ? "完整 SQL 可同时输出指标和维度，解析后确认字段角色即可一起取数；保留模板位置时，也可组合独立维度来源。" : "每个实体输出唯一一行 ID 与维度值；允许维度原值为 NULL，关联实体缺失另行阻断。"}</p>${item.kind === "metric" ? btn("full-sql-example", "使用指标 × 维度示例", "code-2", "link") : ""}<p>demo_orders：order_id、user_id、group_id、group_name、is_control、libra_id、order_date、coupon_meta_id、pay_amount、redeemed。demo_users：user_id、historical_spend、lifecycle、city_id。</p></details>`;
+    return `<div class="c-sql-layout ${parameterOpen ? "parameters-open" : ""}"><div class="c-editor"><div class="p-editor-toolbar"><span>${icon("code-2")}SQL</span><div>${btn("toggle-parameters", "可用参数", "braces", "link", `aria-expanded="${parameterOpen}"`)}${check("自动解析", "draft.autoParse", d.autoParse !== false)}</div></div><div class="p-code"><pre class="p-line-numbers" aria-hidden="true">${d.sql.split("\n").map((_, i) => i + 1).join("\n")}</pre><div class="p-code-body"><pre class="p-code-highlight" aria-hidden="true">${syntax(d.sql)}</pre><textarea id="sql-editor" aria-label="SQL 编辑器" spellcheck="false" data-model="draft.sql">${esc(d.sql)}</textarea></div></div></div><aside class="c-parameter-catalog" id="parameter-catalog" ${parameterOpen ? "" : "hidden"}><header><strong>可用参数</strong>${btn("toggle-parameters", "收起", "x", "link")}</header><label class="search-field">${icon("search")}<input type="search" aria-label="搜索可用参数" data-model="parameter-search" value="${esc(parameterSearch)}" placeholder="搜索名称或 Key"></label><div id="parameter-catalog-list">${parameterRows()}</div><small>点击插入光标位置</small></aside></div><div id="sql-parse-tools">${parseToolsHTML()}</div>`;
   }
   function parameterRows() {
     const types = { number: "数字", string: "字符串", date: "日期", number_list: "数字列表" };
@@ -260,12 +258,12 @@ export function mountComposer({ capabilities, showToast }) {
     outlet.innerHTML = header(item.name, "编写 SQL，确认输出与参数，单独运行后发布版本。",
       (readonly ? "" : btn("save", "保存 SQL", "save")) + btn("item-context", "独立试跑", "play", "", busyAttr(busy)) + (readonly ? (sourceType(item) === "builtin_sql" ? btn("copy-source", "复制为自定义 SQL", "copy", "primary", `data-id="${item.id}" data-version="${item.versions.at(-1).number}"`) : "") : owner ? btn("back-owner", "保存并返回能力组", "arrow-right", "primary") : btn("attach", "关联取数能力组", "layers", "primary", `data-number="${item.versions.at(-1)?.number || 0}"`)),
       owner ? owner.name : "SQL 取数项", owner ? `#/ability/${owner.id}` : "#/items")
-      + workflowSteps("sql") + statusBar() + issuesHTML(issues)
+      + configToolbar() + workflowSteps("sql") + statusBar() + issuesHTML(issues)
       + section("取数项信息", "", input("取数项名称", "item.name", item.name) + keyField(item) + area("说明 / 指标口径", "item.description", item.description))
-      + section("SQL 编辑与解析", item.kind === "metric" ? "支持同时输出指标与维度，解析后确认角色。" : "解析实际输出，自动填充维度名称、Key 与样本枚举。", editorHTML() + `<div id="parsed-fields">${fieldsHTML()}</div>`)
+      + section("SQL 编辑与解析", item.kind === "dimension" ? "每个实体需输出唯一一行 ID 和维度值。" : "", editorHTML() + `<div id="parsed-fields">${fieldsHTML()}</div>`)
       + (item.kind === "dimension" ? "" : `<details id="detail-association" class="p-section c-contract" ${directQuery(item) ? "hidden" : ""}><summary>明细关联设置</summary><div class="p-form-grid">${select("统计实体", "draft.entity", [["user", "用户"], ["order", "订单"]], d.entity)}${input("明细实体列", "draft.entityColumn", d.entityColumn)}${input("明细来源别名", "draft.sourceAlias", d.sourceAlias)}</div></details>`)
       + parameterBindingsHTML()
-      + section("取数验证", "独立运行这个 SQL，核对后发布复用；也可以保存到能力组后整体试跑。", `<div class="c-validation-entry"><span>${item.runs.length ? `${statuses[item.runs[0].status]} · ${date(item.runs[0].startedAt)}` : "还没有独立试跑记录"}</span>${btn("item-context", item.runs.length ? "查看结果 / 重新试跑" : "进入取数验证", "arrow-up-right")}</div>`)
+      + section("取数验证", "", `<div class="c-validation-entry"><span>${item.runs.length ? `${statuses[item.runs[0].status]} · ${date(item.runs[0].startedAt)}` : "还没有独立试跑记录"}</span>${btn("item-context", item.runs.length ? "查看结果 / 重新试跑" : "进入取数验证", "arrow-up-right")}</div>`)
       + itemAssociations() + section("发布记录", "", versionsHTML(item, "item"))
       + `<div class="c-page-more">${moreActions(item, "item")}</div>`;
     const editor = outlet.querySelector("#sql-editor");
@@ -290,7 +288,7 @@ export function mountComposer({ capabilities, showToast }) {
         `<div class="p-run-history">${item.runs.map((r) => btn("select-run", `${statuses[r.status]} · ${date(r.startedAt)}`, "", r === run ? "active" : "", `data-id="${r.id}"`)).join("")}</div><div class="p-result-summary"><div class="p-row">${badge(statuses[run.status], run.status === "success" ? "green" : "amber")}${badge(valid ? "当前配置" : "历史 / 待验证")}<span>${run.rawRows?.length || 0} 行 · ${esc(run.id)}</span></div></div>${issuesHTML(run.error ? [run.error] : [])}${run.status === "running" ? `<div class="p-progress"><span></span>正在执行 SQL…</div>` : table(run)}
         ${run.distinctValues ? `<div class="c-associations">${run.distinctValues.map((v) => badge(v === null ? "NULL（原值）" : v)).join("")}</div>` : ""}
         ${unmatched.length ? `<p class="c-config-hint">实际输出包含候选定义之外的值：${unmatched.map((v) => esc(v === null ? "NULL" : v)).join("、")}。可补充枚举定义后重新核对。</p>` : ""}
-        <details class="p-snapshot"><summary>本次实际 SQL 与定义快照</summary><pre>${esc(run.renderedSql || "")}</pre><pre>${esc(JSON.stringify(run.snapshot, null, 2))}</pre></details>
+        <details class="p-snapshot"><summary>查看执行 SQL</summary><pre>${esc(run.renderedSql || "")}</pre></details>
         <div class="p-confirm-result">${check("已核对当前 SQL 输出、口径与原生类型", "approve-item", valid && run.approvedFor === itemReviewSignature(item, itemContext()), valid && (item.scenario || "normal") === "normal" ? "" : "disabled")}${!valid ? "<small>SQL 或配置变化后需要重新运行。</small>" : ""}</div>`, "", "item-results");
   }
   function itemAssociations() {
@@ -321,26 +319,64 @@ export function mountComposer({ capabilities, showToast }) {
     if (ability) { try { tasks = abilityModes(store, ability).length; } catch { /* Configuration validation supplies the explanation. */ } }
     const basicReady = Boolean(context.libra_id && context.start_date && context.end_date && context.start_date <= context.end_date);
     outlet.innerHTML = `<header class="c-trial-header"><a class="p-button link" href="#/${item ? "item" : "ability"}/${obj.id}" aria-label="返回配置">${icon("arrow-left")}</a><div><a href="#/capabilities">取数能力列表 · 取数验证</a><h1>试跑${item ? " SQL 取数项" : "取数能力"}“${esc(obj.name)}”</h1><div class="p-row">${badge(ability?.goal || "独立 SQL", "blue")}${badge(`${metrics.length} 个指标`, "blue")}${badge(`${dimensions.length} 个下钻维度`, "blue")}</div></div>${badge(item ? "仅执行当前 SQL 取数项" : "仅执行当前取数能力", "blue")}</header>
-      <div class="c-trial-evidence"><span>已选证据</span><strong>${metrics.length} 个指标</strong><strong>${dimensions.length} 个下钻维度</strong><div>${metrics.map((f) => badge(`指标 · ${f.name}`)).join("")}${dimensions.map((d) => badge(`维度 · ${d.name}`)).join("")}</div></div>
-      <section class="c-trial-context"><header>${icon("flask-conical")}<strong>输入实验 ID 和观测时间并获取数据</strong></header><div class="c-trial-inputs">${input("实验 ID", "context.libra_id", context.libra_id, 'placeholder="例如：4823214"')}<div><span class="c-trial-label">观测时间</span><div class="c-trial-dates">${input("开始", "context.start_date", context.start_date, 'type="date" aria-label="观测开始日期"')}<span>→</span>${input("结束", "context.end_date", context.end_date, 'type="date" aria-label="观测结束日期"')}</div></div></div><details class="c-trial-advanced"><summary>更多上下文参数与异常模拟</summary><div class="p-form-grid two">${parameterCatalog.filter((p) => !["libra_id", "start_date", "end_date"].includes(p.key)).map((p) => input(p.name, `context.${p.key}`, context[p.key])).join("")}${select("异常模拟场景", "scenario", Object.entries(scenarios), obj.scenario || "normal")}</div></details><footer><div>取数计划：<strong>${tasks} 个任务</strong><p>${item ? "仅获取当前 SQL 的实际输出" : "获取已配置的整体与独立 / 交叉下钻数据"}</p></div>${btn("trial-run", busy ? "正在获取数据…" : "获取数据", "database", "primary", busyAttr(busy || !basicReady || !tasks))}</footer></section>
-      <p class="c-config-hint">本地示例实验 4823214，2026-10-01 至 2026-10-03；SQL 在生成的底表实际执行。</p>
+      ${configToolbar()}<div class="c-trial-evidence"><span>已选证据</span><strong>${metrics.length} 个指标</strong><strong>${dimensions.length} 个下钻维度</strong><div>${metrics.map((f) => badge(`指标 · ${f.name}`)).join("")}${dimensions.map((d) => badge(`维度 · ${d.name}`)).join("")}</div></div>
+      <section class="c-trial-context"><header>${icon("flask-conical")}<strong>实验与观测时间</strong></header><div class="c-trial-inputs">${input("实验 ID", "context.libra_id", context.libra_id, 'placeholder="请输入实验 ID"')}<div><span class="c-trial-label">观测时间</span><div class="c-trial-dates">${input("开始", "context.start_date", context.start_date, 'type="date" aria-label="观测开始日期"')}<span>→</span>${input("结束", "context.end_date", context.end_date, 'type="date" aria-label="观测结束日期"')}</div></div></div><details class="c-trial-advanced"><summary>更多上下文参数</summary><div class="p-form-grid two">${parameterCatalog.filter((p) => !["libra_id", "start_date", "end_date"].includes(p.key)).map((p) => input(p.name, `context.${p.key}`, context[p.key])).join("")}</div></details><footer><div>取数计划：<strong>${tasks} 个任务</strong></div>${btn("trial-run", busy ? "正在获取数据…" : "获取数据", "database", "primary", busyAttr(busy || !basicReady || !tasks))}</footer></section>
       ${workflowSteps("trial")}<div id="trial-validation">${issuesHTML(issues)}</div>${item ? itemResults() : abilityResults()}
       <div class="c-trial-next">${!obj.archived && (!item || sourceType(item) === "custom_sql") ? btn(item ? "publish-item" : "publish-ability", item ? "发布 SQL 取数项" : "发布取数能力组", "upload", "primary", busyAttr(busy)) : ""}${item ? (!item.archived ? btn("attach", "关联 / 新建能力组", "layers", "", `data-number="${item.versions.at(-1)?.number || 0}"`) : "") : btn("use-ability", "进入分析模块", "arrow-up-right", "", `data-id="${ability.id}" ${ability.versions.length && !ability.archived ? "" : "disabled"}`)}</div>`;
     refreshIcons();
   }
-  function contextHTML(context, scenario) {
-    return `<p>固定示例：Libra 4823214，2026-10-01 至 2026-10-03，券模板 101 / 102。</p><div class="p-form-grid two">${parameterCatalog.map((p) => input(p.name, `context.${p.key}`, context[p.key], p.type === "date" ? 'type="date"' : "")).join("")}</div><details class="p-scenarios"><summary>异常模拟场景</summary>${select("场景", "scenario", Object.entries(scenarios), scenario)}<p>异常场景用于演示权限、失败和数据校验路径。</p></details>`;
+  function contextHTML(context) {
+    return `<div class="p-form-grid two">${parameterCatalog.map((p) => input(p.name, `context.${p.key}`, context[p.key], p.type === "date" ? 'type="date"' : "")).join("")}</div>`;
+  }
+  function presetDraft(id = presetId) {
+    return store.presetDrafts[id] ||= { metrics: [], dimensions: [], context: clone(defaultContext) };
+  }
+  function syncPresetSelection(id, selection) {
+    const draft = presetDraft(id);
+    if (JSON.stringify([draft.metrics, draft.dimensions]) !== JSON.stringify([selection.metrics, selection.dimensions])) {
+      draft.metrics = clone(selection.metrics); draft.dimensions = clone(selection.dimensions);
+      presetResult = ""; persist();
+    }
+  }
+  function presetSnapshot(id) {
+    const capability = capabilities.find((c) => c.id === id);
+    if (!capability) throw new Error("这个预置能力已不可用。");
+    const draft = presetDraft(id);
+    return { capabilityId: id, title: capability.title, metrics: clone(draft.metrics), dimensions: clone(draft.dimensions), context: clone(draft.context || defaultContext) };
+  }
+  function presetResultsHTML() {
+    if (presetResult !== presetId) return `<div class="p-empty">${icon("table-2")}<p>尚未展示结果，可点击“查看示例数据”。</p></div>`;
+    const selection = presetDraft(), modes = selection.dimensions.length ? selection.dimensions : ["整体"];
+    const samples = {
+      "实验时间": ["2026-10-01 至 2026-10-03", "2026-10-01 至 2026-10-03"],
+      "实验流量": ["0.50", "0.50"], "发券面额": ["无", "10 元券"], "发券时效": ["不适用", "领取后 3 天"],
+      "券可用范围": ["不适用", "示例商品"], "领取次数": ["0", "1"], "发券点位": ["不适用", "示例会场"],
+      "GMV": ["7200", "8160"], "支付订单量": ["36", "36"], "支付用户数": ["6", "6"],
+      "补贴金额": ["0", "240"], "核销率": ["0.6667", "0.6667"]
+    };
+    return modes.map((dimension) => `<div class="c-preset-result"><h3>${esc(dimension)} · 固定示例</h3><div class="p-table-scroll"><table class="p-table"><thead><tr><th>分组</th>${selection.metrics.map((m) => `<th>${esc(m)}</th>`).join("")}</tr></thead><tbody>${["对照组", "实验组"].map((group, i) => `<tr><td>${group}</td>${selection.metrics.map((m) => `<td>${esc(samples[m]?.[i] ?? "未提供示例值")}</td>`).join("")}</tr>`).join("")}</tbody></table></div></div>`).join("");
+  }
+  function renderPresetTrial() {
+    const capability = capabilities.find((c) => c.id === presetId);
+    if (!capability) { location.hash = "/capabilities"; return; }
+    const draft = presetDraft(), context = draft.context ||= clone(defaultContext);
+    outlet.innerHTML = header(`试跑取数能力“${capability.title}”`, "预置能力 · 选择指标、维度与实验上下文。", btn("preset-edit", "调整指标与维度", "square-pen"))
+      + configToolbar()
+      + section("已选证据", `${draft.metrics.length} 个指标 · ${draft.dimensions.length} 个下钻维度`, `<div class="p-row">${draft.metrics.map((m) => badge(`指标 · ${m}`, "blue")).join("")}${draft.dimensions.map((d) => badge(`维度 · ${d}`)).join("")}${!draft.metrics.length ? '<p class="p-muted">尚未选择指标，请点击“调整指标与维度”。</p>' : ""}</div>`)
+      + section("试跑上下文", "随取数配置保存，载入后可直接修改。", `<div class="p-form-grid two">${parameterCatalog.map((p) => input(p.name, `preset-context.${p.key}`, context[p.key], p.type === "date" ? 'type="date"' : "")).join("")}</div>`)
+      + section("示例结果", "固定样例，结果不随实验与日期变化。", `<div id="preset-results">${presetResultsHTML()}</div>`, btn("preset-run", "查看示例数据", "table-2", "primary", draft.metrics.length ? "" : "disabled"));
+    refreshIcons();
   }
   function renderModules() {
     const m = store.analysis, versions = store.abilities.flatMap((a) => a.versions.filter((v) => !a.archived || (m.capabilityId === a.id && m.version === v.number)).map((v) => [`${a.id}:${v.number}`, `${v.name} · v${v.number}${a.archived ? " · 已归档引用" : ""}`]));
     const v = store.abilities.find((a) => a.id === m.capabilityId)?.versions.find((v) => v.number === m.version);
     outlet.innerHTML = header(m.name, "引用确定的取数能力版本，选择输入并配置分析思路。", btn("save", "保存草稿", "save") + btn("analysis-context", "试跑上下文", "settings-2") + btn("analyze", "分析试跑", "flask-conical", "primary", busyAttr(busy)))
       + workflowSteps("analysis") + issuesHTML(issues)
-      + section("分析模块信息", "业务目标与分析要求。", `<div class="p-form-grid two">${input("模块名称", "analysis.name", m.name)}${readonlyField("业务目标", businessGoal)}</div>${area("说明", "analysis.description", m.description)}`)
+      + section("分析模块信息", "", `<div class="p-form-grid two">${input("模块名称", "analysis.name", m.name)}${readonlyField("业务目标", businessGoal)}</div>${area("说明", "analysis.description", m.description)}`)
       + section("取数能力", "显式引用固定版本；源 SQL 或能力草稿修改不影响当前分析。",
         select("能力版本", "analysis-reference", [["", "请选择已发布能力"], ...versions], `${m.capabilityId}:${m.version}`)
         + (v ? `<div class="p-selection-modes">${v.modes.map((mode) => `<article class="p-selection-mode"><strong>${esc(mode.name)}</strong><p>${mode.kind === "cross" ? "交叉成员" : mode.kind === "single" ? "单维下钻" : "整体"} · ${esc(mode.members.join(" × "))}</p><div class="p-checks">${mode.fields.filter((f) => f.role === "metric").map((f) => check(esc(f.name), `analysis-select.${mode.id}.${f.key}`, m.selections[mode.id]?.includes(f.key))).join("")}</div></article>`).join("")}</div>` : `<div class="p-empty">先完成取数能力试跑、核对与发布。</div>`))
-      + section("分析配置", "示例分析根据真实 SQL 输出生成组间数值证据。", area("分析思路", "analysis.reasoning", m.reasoning) + area("注意事项", "analysis.considerations", m.considerations))
+      + section("分析配置", "", area("分析思路", "analysis.reasoning", m.reasoning) + area("注意事项", "analysis.considerations", m.considerations))
       + section("分析试跑记录", "取数成功和分析成功分别记录。", m.attempts.length ? m.attempts.map((a) => `<div class="p-version"><div><strong>${statuses[a.status]}</strong><span>${esc(a.capabilityName)} · v${a.version} · ${date(a.startedAt)}</span><small>${a.reused ? "复用相同输入快照" : "按固定版本重新取数"}</small></div><a class="p-button" href="#/analysis/${a.id}">查看输入与结论 ${icon("arrow-up-right")}</a></div>`).join("") : `<p class="p-muted">暂无分析试跑。</p>`);
     refreshIcons();
   }
@@ -351,17 +387,18 @@ export function mountComposer({ capabilities, showToast }) {
     outlet.innerHTML = header(`${a.capabilityName} · 分析试跑`, `能力 v${a.version} · ${date(a.startedAt)} · ${a.id}`, btn("back-modules", "返回分析配置", "arrow-left"), "分析模块", "#/modules")
       + `<div class="p-analysis-meta">${badge(statuses[a.status], a.status === "success" ? "green" : "amber")}${badge(`Libra ${a.snapshot.context.libra_id}`)}${badge(`${a.snapshot.context.start_date} 至 ${a.snapshot.context.end_date}`)}</div><div class="p-mode-tabs">${btn("analysis-output", "分析输出", "file-text", analysisTab === "output" ? "active" : "")}${btn("analysis-input", "输入数据与证据", "table-2", analysisTab === "input" ? "active" : "")}</div>`
       + (analysisTab === "output" ? section("分析输出", "仅描述实际输入中的组间数值。", a.status === "running" ? `<div class="p-progress"><span></span>正在检查输入并生成证据…</div>` : `<div class="p-conclusions">${a.evidence.map((e) => `<article><div>${icon("chart-no-axes-combined")}<p>${esc(e.text)}</p></div>${btn("evidence", "查看数据证据", "arrow-up-right", "link", `data-execution="${e.executionId}" data-row="${e.rowIndex}"`)}</article>`).join("")}</div><div class="p-analysis-gaps"><h3>判断边界</h3>${a.gaps.map((g) => `<p>${icon("info")}${esc(g)}</p>`).join("")}</div>`)
-        : section("本次输入数据", "沿用发布时的 SQL 与成员定义，按本次上下文重新执行。", `<div class="p-mode-tabs">${a.records.map((r) => btn("analysis-record", esc(r.modeName), "", r === record ? "active" : "", `data-id="${r.id}"`)).join("")}</div>${record ? table(record, highlight) + `<details class="p-snapshot"><summary>实际 SQL 与 Dataset</summary><pre>${esc(record.renderedSql || "")}</pre><pre>${esc(JSON.stringify({ dataset: record.dataset, adapter: record.adapter }, null, 2))}</pre></details>` : `<div class="p-empty">尚无可用输入。</div>`}`));
+        : section("本次输入数据", "", `<div class="p-mode-tabs">${a.records.map((r) => btn("analysis-record", esc(r.modeName), "", r === record ? "active" : "", `data-id="${r.id}"`)).join("")}</div>${record ? table(record, highlight) + `<details class="p-snapshot"><summary>查看执行 SQL</summary><pre>${esc(record.renderedSql || "")}</pre></details>` : `<div class="p-empty">尚无可用输入。</div>`}`));
     refreshIcons();
     if (highlight >= 0) outlet.querySelector(`#evidence-${highlight}`)?.scrollIntoView({ block: "center" });
   }
   function render() {
     const [page, id, trialId] = location.hash.replace(/^#\/?/, "").split("/");
     trialKind = page === "trial" ? id : "";
+    presetId = trialKind === "preset" ? trialId : "";
     ability = page === "ability" || trialKind === "ability" ? store.abilities.find((a) => a.id === (trialKind ? trialId : id)) : undefined;
     item = page === "item" || trialKind === "item" ? store.items.find((s) => s.id === (trialKind ? trialId : id)) : undefined;
     catalog.hidden = ["ability", "item", "items", "modules", "analysis", "trial", "guide"].includes(page); outlet.hidden = !catalog.hidden;
-    if (trialKind && (item || ability)) renderTrial(); else if (ability) renderAbility(); else if (item) renderItem(); else if (page === "items") renderLibrary();
+    if (presetId) renderPresetTrial(); else if (trialKind && (item || ability)) renderTrial(); else if (ability) renderAbility(); else if (item) renderItem(); else if (page === "items") renderLibrary();
     else if (page === "modules") renderModules(); else if (page === "analysis") renderAnalysis(id); else if (page === "guide") renderGuide(); else renderCatalog();
     document.querySelectorAll(".nav-item").forEach((a) => {
       const active = a.textContent.includes(["modules", "analysis"].includes(page) ? "实验分析模块" : "取数能力");
@@ -466,11 +503,40 @@ export function mountComposer({ capabilities, showToast }) {
     overlay.innerHTML = `<button class="p-overlay-backdrop" data-action="close" aria-label="关闭弹层"></button><aside class="p-drawer ${wide ? "wide" : ""}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><header><h2>${title}</h2>${btn("close", "关闭", "x", "link")}</header><div class="p-drawer-body">${body}</div><footer>${footer || btn("close", "关闭")}</footer></aside>`;
     refreshIcons(); overlay.querySelector(".p-drawer input, .p-drawer select, .p-drawer button")?.focus();
   }
-  function closeDialog() { overlay.hidden = true; overlay.innerHTML = ""; document.body.classList.remove("p-modal-open"); previousFocus?.focus(); dialogKind = ""; }
+  function closeDialog() {
+    const environmentSettings = overlay.querySelector('[data-model="scenario"]');
+    overlay.hidden = true; overlay.innerHTML = ""; document.body.classList.remove("p-modal-open"); previousFocus?.focus(); dialogKind = "";
+    if (environmentSettings) render();
+  }
+  function configDetails(config) {
+    const { kind, snapshot: s } = config, d = s.definition;
+    const metrics = kind === "preset" ? s.metrics : kind === "ability" ? d.metrics.flatMap((r) => r.definition.draft.fields.filter((f) => r.metricKeys.includes(f.key)).map((f) => f.name)) : d.draft.fields.filter((f) => f.role === "metric").map((f) => f.name);
+    const dimensions = kind === "preset" ? s.dimensions : kind === "ability" ? [...d.dimensions.map((r) => r.definition.draft.dimensionName), ...d.metrics.flatMap((r) => outputDimensions(r.definition).map((f) => f.name))] : d.kind === "dimension" ? [d.draft.dimensionName] : outputDimensions(d).map((f) => f.name);
+    return `<details class="c-config-details"><summary>查看取数内容</summary><p>指标：${esc(metrics.join("、") || "未选择")}</p><p>维度：${esc(dimensions.join("、") || "未选择")}</p>${kind === "ability" ? `<p>下钻组：${esc(d.groups.map((g) => g.name).join("、") || "未配置")} · ${d.includeOverall ? "包含整体" : "仅下钻"}</p>` : ""}<p>券模板：${esc(s.context?.coupon_meta_ids || "未填写")} · 实验版本：${esc(s.context?.versionIds || "未填写")}</p></details>`;
+  }
+  function configRows() {
+    const configs = store.retrievalConfigs.filter((c) => [c.name, c.description, configSummary(c)].join(" ").toLowerCase().includes(configSearch.trim().toLowerCase()));
+    if (!configs.length) return `<div class="p-empty">${icon("folder-open")}<p>${store.retrievalConfigs.length ? "没有匹配的配置，试试其他名称或清空搜索。" : "还没有保存的取数配置。"}</p>${!store.retrievalConfigs.length ? "<small>在能力配置或试跑页点击“保存取数配置”，即可在这里复用。</small>" : ""}</div>`;
+    return configs.map((c) => {
+      const context = c.snapshot.context || {};
+      return `<article class="c-saved-config" data-config-id="${c.id}"><header><div><strong>${esc(c.name)}</strong>${badge(configTypes[c.kind], c.kind === "preset" ? "blue" : c.kind === "item" ? "purple" : "")}</div>${btn("config-delete", "", "trash-2", "link", `data-id="${c.id}" aria-label="删除配置 ${esc(c.name)}"`)}</header>${c.description ? `<p>${esc(c.description)}</p>` : ""}<p>${esc(configSummary(c))}</p><p class="c-config-context">实验 ${esc(context.libra_id || "未填写")} · ${esc(context.start_date || "未填写")} → ${esc(context.end_date || "未填写")}</p>${configDetails(c)}<footer><small>保存于 ${date(c.createdAt)}</small>${btn("config-apply", c.kind === "preset" ? "载入并试跑" : c.kind === "item" ? "载入为新 SQL" : "载入为新能力", "arrow-up-right", "", `data-id="${c.id}"`)}</footer></article>`;
+    }).join("");
+  }
+  function openConfigLibrary() {
+    openDialog("载入已有取数配置", `<p class="c-config-help">载入为独立草稿，可修改并另存。</p><label class="search-field c-config-search">${icon("search")}<input type="search" aria-label="搜索取数配置" data-model="config-search" value="${esc(configSearch)}" placeholder="搜索配置名称或说明"></label><div id="saved-config-list">${configRows()}</div>`, btn("close", "关闭"));
+    overlay.querySelector('[data-model="config-search"]').focus();
+  }
+  function openSaveConfig(id) {
+    const preset = id ? presetSnapshot(id) : undefined;
+    configDraft = { captured: captureConfig(store, item || ability, preset), name: preset?.title || (item || ability).name, description: "" };
+    openDialog("保存取数配置", `${input("配置名称", "config-form.name", configDraft.name, 'maxlength="80" placeholder="例如：支付表现 · 城市对比"')}${area("说明（选填）", "config-form.description", "")}<div class="c-config-preview">${badge(configTypes[configDraft.captured.kind])}<p>${esc(configSummary(configDraft.captured))}</p><small>保存当前选择、SQL 定义与试跑参数。载入后可继续修改。</small></div><p class="c-config-help">每次保存新增一份配置；同名也会分别保留。</p>`,
+      btn("close", "取消") + btn("config-confirm-save", "保存配置", "bookmark-plus", "primary"));
+    overlay.querySelector('[data-model="config-form.name"]').select();
+  }
   function openPicker(kind) {
     pickerKind = kind;
     const available = store.items.filter((s) => !s.archived && s.kind === kind && s.versions.length && !(kind === "metric" ? ability.metrics : ability.dimensions).some((r) => r.itemId === s.id));
-    openDialog(kind === "metric" ? "选择已有指标" : "选择已有维度", `<p>已有库包含本地预设与独立发布的 SQL 取数项，按固定版本加入当前能力。</p><div class="c-picker">${available.map((s) => `<label><input type="checkbox" name="source-choice" value="${s.id}" ${s.unavailable ? "disabled" : ""}><span><strong>${esc(s.name)}</strong>${badge(s.preset ? "预设" : "SQL", s.preset ? "" : "blue")}<p>${esc(s.unavailable || s.description)}</p><small>v${s.versions.at(-1).number} · ${esc(s.key)}</small></span></label>`).join("") || "<p>暂无可添加的已发布取数项。</p>"}</div>`, btn("close", "取消") + btn("confirm-picker", "添加所选", "plus", "primary"));
+    openDialog(kind === "metric" ? "选择已有指标" : "选择已有维度", `<div class="c-picker">${available.map((s) => `<label><input type="checkbox" name="source-choice" value="${s.id}" ${s.unavailable ? "disabled" : ""}><span><strong>${esc(s.name)}</strong>${badge(s.preset ? "预设" : "SQL", s.preset ? "" : "blue")}<p>${esc(s.unavailable || s.description)}</p><small>v${s.versions.at(-1).number} · ${esc(s.key)}</small></span></label>`).join("") || "<p>暂无可添加的已发布取数项。</p>"}</div>`, btn("close", "取消") + btn("confirm-picker", "添加所选", "plus", "primary"));
   }
   function newSource(kind, owned) {
     if (owned) assertMutable(ability);
@@ -488,7 +554,57 @@ export function mountComposer({ capabilities, showToast }) {
     if (trigger.disabled) return;
     try {
       if (a === "close") { closeDialog(); return; }
-      if (item && ["save", "back-owner", "parse", "accept-diff", "remove-enum", "reset-enums", "edit-field", "save-field", "confirm-save-field", "insert-parameter", "full-sql-example", "confirm-full-sql", "publish-item", "confirm-publish-item"].includes(a)) assertMutable(item);
+      if (a === "environment") {
+        const analysisPage = /^#\/(?:modules|analysis)(?:\/|$)/.test(location.hash);
+        const target = item || ability || (analysisPage ? store.analysis : null);
+        dialogKind = item ? "item-context" : ability ? "ability-context" : "analysis-context";
+        openDialog("演示环境", `<p>使用示例数据，配置与发布版本仅保存在当前浏览器。</p>${target ? `<details class="p-scenarios"><summary>测试设置</summary>${select("取数场景", "scenario", Object.entries(scenarios), target.scenario || "normal")}${item || ability ? check("发布失败", "publish-failure", publishFailure) : ""}</details>` : ""}`);
+        return;
+      }
+      if (a === "config-load") { if (!busy) openConfigLibrary(); return; }
+      if (a === "config-save") { openSaveConfig(trigger.dataset.preset || presetId); return; }
+      if (a === "config-confirm-save") {
+        const config = saveConfig(store, configDraft.captured, configDraft.name, configDraft.description);
+        if (!persist()) { store.retrievalConfigs = store.retrievalConfigs.filter((c) => c.id !== config.id); return; }
+        closeDialog(); showToast("取数配置已保存，可从“载入已有取数配置”复用"); return;
+      }
+      if (a === "config-apply") {
+        if (busy) return;
+        const config = store.retrievalConfigs.find((c) => c.id === id);
+        if (!config) throw new Error("这份配置已不存在，请重新打开列表。");
+        if (config.kind === "preset") {
+          const s = config.snapshot, capability = capabilities.find((c) => c.id === s.capabilityId);
+          if (!capability || s.metrics.some((m) => !capability.metrics.some(([name]) => name === m)) || s.dimensions.some((d) => !capability.dimensions.includes(d))) throw new Error("此配置中的内置指标或维度已不可用。");
+          store.presetDrafts[s.capabilityId] = clone({ metrics: s.metrics, dimensions: s.dimensions, context: s.context });
+          applyPresetSelection(s.capabilityId, store.presetDrafts[s.capabilityId], true);
+          presetResult = ""; persist(); closeDialog(); location.hash = `/trial/preset/${s.capabilityId}`; render();
+          showToast("已载入，可修改参数或另存一份配置"); return;
+        }
+        const loaded = instantiateConfig(store, config);
+        persist(); closeDialog(); selectedRun = ""; selectedRecord = "";
+        location.hash = `/${loaded.kind}/${loaded.obj.id}`;
+        showToast(loaded.kind === "ability" ? "已载入为新能力，请确认配置后试跑" : "已载入为独立 SQL，可修改或关联能力组"); return;
+      }
+      if (a === "config-delete") {
+        const config = store.retrievalConfigs.find((c) => c.id === id);
+        openDialog("删除取数配置", `<p>删除“${esc(config.name)}”？已载入的草稿与原能力会保留。</p>`, btn("config-load", "取消") + btn("config-confirm-delete", "删除配置", "trash-2", "primary", `data-id="${id}"`)); return;
+      }
+      if (a === "config-confirm-delete") {
+        const previous = store.retrievalConfigs;
+        store.retrievalConfigs = previous.filter((c) => c.id !== id);
+        if (!persist()) { store.retrievalConfigs = previous; return; }
+        openConfigLibrary(); showToast("已删除取数配置"); return;
+      }
+      if (a === "preset-run") { presetResult = presetId; renderPresetTrial(); return; }
+      if (a === "preset-edit") {
+        const id = presetId;
+        document.querySelector("#catalog-search").value = ""; catalogSource = "all"; catalogState = "all";
+        filters.querySelector('[data-model="catalog-source"]').value = "all"; filters.querySelector('[data-model="catalog-state"]').value = "all";
+        applyPresetSelection(id, presetDraft(), true);
+        location.hash = "/capabilities";
+        requestAnimationFrame(() => catalog.querySelector(`[data-capability-id="${id}"]`)?.scrollIntoView({ block: "start" })); return;
+      }
+      if (item && ["save", "back-owner", "parse", "accept-diff", "remove-enum", "reset-enums", "edit-field", "save-field", "confirm-save-field", "insert-parameter", "publish-item", "confirm-publish-item"].includes(a)) assertMutable(item);
       if (ability && (["save", "confirm-picker", "remove-source", "remove-group", "add-single", "add-cross", "publish-ability", "confirm-publish-ability"].includes(a) || a.startsWith("pick-"))) assertMutable(ability);
       if (a === "toggle-parameters") {
         parameterOpen = !parameterOpen;
@@ -501,14 +617,6 @@ export function mountComposer({ capabilities, showToast }) {
         const editor = outlet.querySelector("#sql-editor");
         editor.setRangeText(`\${${trigger.dataset.key}}`, editor.selectionStart, editor.selectionEnd, "end");
         editor.focus(); editor.dispatchEvent(new Event("input", { bubbles: true })); return;
-      }
-      if (a === "full-sql-example") {
-        openDialog("使用完整 SQL 示例", "<p>将当前 SQL 替换为消费力 × 城市的联合查询，同时输出 GMV、订单量和核销率。替换后会重新解析，原发布版本保持固定。</p>", btn("close", "取消") + btn("confirm-full-sql", "使用示例", "check", "primary")); return;
-      }
-      if (a === "confirm-full-sql") {
-        closeDialog();
-        const editor = outlet.querySelector("#sql-editor"); editor.value = sampleSQL(["spend_tier", "city_id"]);
-        editor.dispatchEvent(new Event("input", { bubbles: true })); await performParse(item, true); return;
       }
       if (a === "view-group-sql") {
         const modes = abilityModes(store, ability).filter((mode) => mode.id.endsWith(`__${id}`));
@@ -525,15 +633,12 @@ export function mountComposer({ capabilities, showToast }) {
       if (a === "item-library" || a === "library-all") { location.hash = "/items"; return; }
       if (a === "back-modules") { location.hash = "/modules"; return; }
       if (a === "workflow-guide") { location.hash = "/guide"; return; }
-      if (a === "demo-fields") { location.hash = "/item/demo-sql-metric"; return; }
-      if (a === "demo-results") { location.hash = "/trial/ability/demo-sql-ability"; return; }
-      if (a === "demo-analysis") { location.hash = "/analysis/demo-sql-analysis"; return; }
       if (a === "back-owner") { saveDraft(item, store); syncMetricReferences(item); persist(); location.hash = `/ability/${item.ownerAbilityId}`; return; }
       if (a === "new-ability") { const ability = newAbility("未命名取数能力"); store.abilities.push(ability); persist(); location.hash = `/ability/${ability.id}`; return; }
       if (["edit-ability", "run-catalog"].includes(a)) { location.hash = a === "run-catalog" ? `/trial/ability/${id}` : `/ability/${id}`; return; }
       if (a === "edit-item") { location.hash = `/item/${id}`; return; }
       if (a.startsWith("new-owned-") || a.startsWith("new-item-")) { newSource(a.endsWith("dimension") ? "dimension" : "metric", a.startsWith("new-owned-")); return; }
-      if (a === "save") { saveDraft(item || ability || store.analysis, store); persist(); render(); showToast("草稿已保存至当前浏览器"); return; }
+      if (a === "save") { saveDraft(item || ability || store.analysis, store); persist(); render(); showToast("草稿已保存"); return; }
       if (a === "export") {
         const url = URL.createObjectURL(new Blob([JSON.stringify(store, null, 2)], { type: "application/json" }));
         const link = document.createElement("a"); link.href = url; link.download = "msense-composer-workspace.json"; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); return;
@@ -631,13 +736,13 @@ export function mountComposer({ capabilities, showToast }) {
       if (a === "publish-item" || a === "publish-ability") {
         const list = a === "publish-item" ? itemPublishIssues(item, itemContext(), item.scenario || "normal") : abilityPublishIssues(store, ability);
         openDialog(a === "publish-item" ? "发布 SQL 取数项" : "发布取数能力",
-          `<p>发布 v${(item || ability).versions.length + 1} · ${esc((item || ability).name)}</p>${issuesHTML(list)}<p>发布将生成本地不可变快照；${a === "publish-item" ? "随后可添加至已有取数能力。" : "包含所引用取数项和能力内草稿的完整定义，供分析模块引用。"}</p>${check("模拟发布注册失败", "publish-failure", false)}`,
-          btn("close", "返回编辑") + btn(a === "publish-item" ? "confirm-publish-item" : "confirm-publish-ability", "确认发布 · 本地", "upload", "primary", list.length ? "disabled" : "")); return;
+          `<p>发布 v${(item || ability).versions.length + 1} · ${esc((item || ability).name)}</p>${issuesHTML(list)}<p>${a === "publish-item" ? "发布后可关联到其他取数能力。" : "发布后可在分析模块中选择此版本。"}</p>`,
+          btn("close", "返回编辑") + btn(a === "publish-item" ? "confirm-publish-item" : "confirm-publish-ability", "确认发布", "upload", "primary", list.length ? "disabled" : "")); return;
       }
       if (a === "confirm-publish-item" || a === "confirm-publish-ability") {
-        if (overlay.querySelector('[data-model="publish-failure"]').checked) { showToast("模拟注册失败，未创建版本；可直接重试"); return; }
+        if (publishFailure) { showToast("发布失败，未创建版本，请重试"); return; }
         const version = a === "confirm-publish-item" ? publishItem(item, itemContext(), item.scenario || "normal") : publishAbility(store, ability);
-        persist(); closeDialog(); render(); showToast(`已发布 v${version.number} · 本地可用`); return;
+        persist(); closeDialog(); render(); showToast(`已发布 v${version.number}`); return;
       }
       if (a === "attach") {
         const fresh = newAbility(`${item.name}取数组`);
@@ -675,9 +780,6 @@ export function mountComposer({ capabilities, showToast }) {
       if (a === "analysis-output" || a === "analysis-input") { analysisTab = a === "analysis-output" ? "output" : "input"; highlight = -1; render(); return; }
       if (a === "analysis-record") { selectedRecord = id; highlight = -1; render(); return; }
       if (a === "evidence") { selectedRecord = trigger.dataset.execution; highlight = Number(trigger.dataset.row); analysisTab = "input"; render(); return; }
-      if (a === "sample-info") {
-        openDialog("本地示例与运行边界", `<p>demo_orders 有 72 行订单，demo_users 有 12 个用户。SQL 由浏览器隔离线程内的 SQLite 实际执行，最多预览 500 行，5 秒超时。</p><p>预设指标与维度采用同一示例明细，可与自定义 SQL 组合。原目录的展示用固定结果保留单独标识。</p><p>独立发布与能力发布生成当前浏览器的固定版本；生产底表、权限、任务服务、版本注册和部署接口尚未接入。</p>`, ""); return;
-      }
     } catch (error) { issues = [error.message]; showToast(error.message); if (overlay.hidden) render(); }
   }
   function handleModel(e) {
@@ -688,6 +790,14 @@ export function mountComposer({ capabilities, showToast }) {
     if (["INPUT", "TEXTAREA"].includes(el.tagName) && el.type !== "checkbox" && e.type === "change") return;
     const parts = model.split("."), value = el.type === "checkbox" ? el.checked : el.type === "number" ? Number(el.value) : el.value;
     const [kind, key, detail] = parts;
+    if (kind === "config-search") {
+      configSearch = value; overlay.querySelector("#saved-config-list").innerHTML = configRows(); refreshIcons(); return;
+    }
+    if (kind === "config-form") { configDraft[key] = value; return; }
+    if (kind === "preset-context") {
+      presetDraft().context[key] = value; presetResult = ""; persist();
+      outlet.querySelector("#preset-results").innerHTML = presetResultsHTML(); refreshIcons(); return;
+    }
     if (kind === "parameter-search") {
       parameterSearch = value; outlet.querySelector("#parameter-catalog-list").innerHTML = parameterRows(); refreshIcons(); return;
     }
@@ -712,7 +822,7 @@ export function mountComposer({ capabilities, showToast }) {
     if (kind === "field-reviewed") { fieldDraft.review = !value; return; }
     if (kind === "attach-target") { attachDraft.target = value; return; }
     if (kind === "attach-form") { if (["name", "description"].includes(key)) attachDraft[key] = value; return; }
-    if (kind === "publish-failure") return;
+    if (kind === "publish-failure") { publishFailure = value; return; }
     if (kind === "context") {
       const obj = trialKind === "item" || dialogKind === "item-context" ? (item.context ||= clone(defaultContext)) : trialKind === "ability" || dialogKind === "ability-context" ? ability.context : store.analysis.context;
       obj[key] = value;
@@ -818,5 +928,5 @@ export function mountComposer({ capabilities, showToast }) {
   }); });
   window.addEventListener("hashchange", () => { closeDialog(); issues = []; selectedRun = ""; selectedRecord = ""; render(); window.scrollTo(0, 0); });
   render();
-  return { openDialog, closeDialog };
+  return { openDialog, closeDialog, syncPresetSelection };
 }

@@ -192,6 +192,8 @@ export function loadComposer() {
     syncQueryGroups(store, ability);
   }
   store.analysis.goal = businessGoal;
+  store.retrievalConfigs ||= [];
+  store.presetDrafts ||= {};
   return store;
 }
 export function hasDrillSlots(item) {

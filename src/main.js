@@ -193,9 +193,12 @@ app.innerHTML = `
             <kbd>⌘</kbd><kbd>J</kbd>
           </button>
         </div>
-        <button class="theme-button" type="button" aria-label="切换主题" title="切换主题">
-          <i data-lucide="moon"></i>
-        </button>
+        <div class="c-topbar-tools">
+          <button class="c-environment" type="button" data-action="environment" title="示例数据 · 仅当前浏览器保存">演示环境</button>
+          <button class="theme-button" type="button" aria-label="切换主题" title="切换主题">
+            <i data-lucide="moon"></i>
+          </button>
+        </div>
       </header>
 
       <main class="main-content">
@@ -300,7 +303,7 @@ function cardTemplate(capability, expanded) {
         <span class="summary-actions">
           <button class="outline-button run-button" type="button">
             <i data-lucide="flask-conical"></i>
-            模拟取数
+            试跑
           </button>
           <button class="outline-button expand-button" type="button" aria-expanded="${expanded}">
             <i data-lucide="${expanded ? "chevron-up" : "chevron-down"}"></i>
@@ -379,6 +382,13 @@ function cardTemplate(capability, expanded) {
             }
           </section>
         </div>
+        <div class="c-config-toolbar">
+          <span>复用取数配置</span>
+          <div class="p-actions">
+            <button class="p-button" type="button" data-action="config-load">载入已有取数配置</button>
+            <button class="p-button" type="button" data-action="config-save" data-preset="${capability.id}"><i data-lucide="bookmark-plus"></i>保存取数配置</button>
+          </div>
+        </div>
       </div>
     </article>
   `;
@@ -420,6 +430,7 @@ function updatePanelSelection(panel) {
     metrics: metricNames,
     dimensions: checkedDimensions.map((input) => input.value)
   });
+  prototype?.syncPresetSelection(panel.dataset.capabilityId, catalogSelection.get(panel.dataset.capabilityId));
 
   panel.querySelector(".selected-summary").textContent = `已选 ${checkedMetrics.length} 个指标`;
   panel.querySelector(".group-count").textContent = `已选 ${checkedMetrics.length}/${totalMetrics}`;
@@ -461,22 +472,7 @@ capabilityList.addEventListener("click", (event) => {
   if (event.target.closest(".run-button")) {
     const selection = catalogSelection.get(panel.dataset.capabilityId);
     if (!selection?.metrics.length) { showToast("请先选择至少一个指标"); return; }
-    const capability = capabilities.find((c) => c.id === panel.dataset.capabilityId);
-    const text = (value) => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-    const samples = {
-      "实验时间": ["2026-10-01 至 2026-10-03", "2026-10-01 至 2026-10-03"],
-      "实验流量": ["0.50", "0.50"], "发券面额": ["无", "10 元券"],
-      "发券时效": ["不适用", "领取后 3 天"], "券可用范围": ["不适用", "示例商品"],
-      "领取次数": ["0", "1"], "发券点位": ["不适用", "示例会场"],
-      "GMV": ["7200", "8160"], "支付订单量": ["36", "36"], "支付用户数": ["6", "6"],
-      "补贴金额": ["0", "240"], "核销率": ["0.6667", "0.6667"]
-    };
-    const modes = selection.dimensions.length ? selection.dimensions : ["整体"];
-    prototype.openDialog(`${text(capability.title)} · 模拟取数`,
-      `<div class="p-notice">原目录的内置定义仅为复刻示例，下方是展示用固定数据，不是线上能力执行结果。自定义 SQL 请进入上方“编辑配置”。</div>
-      <p>已选择 ${selection.metrics.length} 个指标、${modes.length} 个独立模式。多个维度分别展示，不产生交叉结果。</p>
-      ${modes.map((dimension) => `<section class="p-section"><h3>${text(dimension)} · 示例 Dataset</h3><div class="p-table-scroll"><table class="p-table"><thead><tr><th>分组</th>${selection.metrics.map((m) => `<th>${text(m)}</th>`).join("")}</tr></thead><tbody>${["对照组", "实验组"].map((group, i) => `<tr><td>${group}</td>${selection.metrics.map((m) => `<td>${text(samples[m]?.[i] ?? "未提供示例值")}</td>`).join("")}</tr>`).join("")}</tbody></table></div></section>`).join("")}`,
-      `<button class="p-button" data-action="close">关闭</button>`, true);
+    location.hash = `/trial/preset/${panel.dataset.capabilityId}`;
   }
 });
 
@@ -545,4 +541,11 @@ document.addEventListener("keydown", (event) => {
 
 renderCards();
 refreshIcons();
-prototype = mountComposer({ capabilities, showToast });
+prototype = mountComposer({
+  capabilities, showToast,
+  applyPresetSelection(id, selection, expand = false) {
+    catalogSelection.set(id, selection);
+    if (expand) expansion.set(id, true);
+    renderCards(document.querySelector("#catalog-search").value);
+  }
+});
