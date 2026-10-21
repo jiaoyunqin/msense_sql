@@ -1,4 +1,4 @@
-import { hash, itemDefinition, abilityDefinition, sourceType, currentActor, identifier } from "./composer-data.js";
+import { hash, uid, itemDefinition, abilityDefinition, sourceType, currentActor, businessGoal } from "./composer-data.js";
 
 export const sourceLabels = {
   builtin_rpc: ["内置 RPC", "blue"],
@@ -29,7 +29,7 @@ function content(definition) {
   }
   return {
     key: definition.key, name: definition.name, description: definition.description,
-    goal: definition.goal, owner: definition.owner, includeOverall: definition.includeOverall,
+    goal: definition.goal, includeOverall: definition.includeOverall,
     metrics: definition.metrics.map((r) => ({ itemId: r.itemId, version: r.version, metricKeys: r.metricKeys, definition: content(r.definition) })),
     dimensions: definition.dimensions.map((r) => ({ itemId: r.itemId, version: r.version, definition: content(r.definition) })),
     groups: definition.groups.map((g) => ({
@@ -65,9 +65,25 @@ export function assertMutable(obj) {
   if (sourceType(obj) !== "custom_sql") throw new Error("内置定义只读，请先复制为自定义 SQL。");
   if (obj.archived) throw new Error("该对象已归档，请先恢复后编辑。");
 }
-export function saveDraft(obj) {
+export function saveDraft(obj, store) {
   if (obj.draft || obj.metrics) assertMutable(obj);
-  obj.keyLocked = true;
+  if (obj.draft || obj.metrics) {
+    if (!obj.key) {
+      const prefix = obj.metrics ? "capability" : obj.kind === "dimension" ? "dimension" : "query";
+      const collection = store ? [...store.items, ...store.abilities] : [];
+      do { obj.key = uid(prefix); } while (collection.some((other) => other.id !== obj.id && other.key === obj.key));
+    }
+    obj.keyLocked = true;
+  }
+  if (obj.metrics) {
+    delete obj.owner;
+    obj.goal = businessGoal;
+    // Saving an ability also saves its new inline SQL definitions.
+    for (const ref of [...obj.metrics, ...obj.dimensions]) {
+      const item = store?.items.find((candidate) => candidate.id === ref.itemId);
+      if (!ref.version && item && !item.key) saveDraft(item, store);
+    }
+  } else if (!obj.draft) obj.goal = businessGoal;
   obj.savedAt = new Date().toISOString();
   obj.updatedAt = obj.savedAt;
   obj.audit ||= [];
@@ -85,16 +101,6 @@ export function keyImpact(store, obj) {
   } else if (store.analysis.capabilityId === obj.id) result.push(`${store.analysis.name} · 固定 v${store.analysis.version}`);
   if (obj.versions.length) result.push(`本对象 ${obj.versions.length} 个已发布版本保持原定义`);
   return result;
-}
-export function changeKey(store, obj, key) {
-  assertMutable(obj);
-  if (!identifier(key)) throw new Error("Key 须以英文或下划线开头，仅含英文、数字与下划线。");
-  const collection = obj.draft ? store.items : store.abilities;
-  if (collection.some((other) => other.id !== obj.id && other.key === key)) throw new Error("Key 已被使用。");
-  const oldKey = obj.key;
-  obj.key = key;
-  saveDraft(obj);
-  obj.audit[0].operation = `修改 Key：${oldKey} → ${key}`;
 }
 export function setArchived(obj, archived) {
   if (sourceType(obj) !== "custom_sql") throw new Error("内置定义不能归档。");

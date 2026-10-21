@@ -140,9 +140,9 @@
 .c-more-actions > div { position: absolute; right: 0; top: 36px; min-width: 110px; padding: 6px; border: 1px solid var(--panel-border); border-radius: 8px; background: var(--surface); box-shadow: 0 4px 16px #10182812; }
 .c-more-actions > div .p-button { width: 100%; justify-content: flex-start; white-space: nowrap; }
 .c-page-more { display: flex; justify-content: flex-end; padding-bottom: 40px; }
-.c-key-field { position: relative; min-width: 0; }
-.c-key-field .p-field input { padding-right: 50px; }
-.c-key-field > .p-button { position: absolute; right: 5px; top: 23px; height: 30px; padding: 3px 8px; font-size: 11px; }
+.c-key-field { min-width: 0; }
+.c-readonly-value { min-height: 36px; padding: 8px 10px; border: 1px solid var(--panel-border); border-radius: 6px; background: var(--surface-subtle); color: var(--text-secondary); font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
+.c-fixed-goal { display: flex; align-items: center; min-height: 36px; width: 100%; padding: 8px 10px; border: 1px solid var(--panel-border); border-radius: 8px; background: var(--surface-subtle); color: var(--text-secondary); font-size: 13px; }
 .c-sql-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .c-sql-layout.parameters-open { grid-template-columns: minmax(0, 1fr) 265px; }
 .c-parameter-catalog { min-width: 0; border: 1px solid var(--panel-border); border-radius: 8px; padding: 12px; background: var(--surface-subtle); }

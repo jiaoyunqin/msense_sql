@@ -6,7 +6,8 @@ export const COMPOSER_KEY = "msense-composer-v2";
 export const identifier = (value) => /^[a-zA-Z_]\w*$/.test(value || "");
 export const slots = ["dimension_select", "dimension_join", "dimension_group"];
 export const currentActor = "sheriqin.01";
-export const businessGoals = ["平台老客提频", "新客转化", "用户召回"];
+export const businessGoal = "平台老客提频";
+export const businessGoals = [businessGoal];
 // Older fixture snapshots predate source metadata; keep their known RPC origin.
 export const sourceType = (obj) => obj.id === "preset-summary-only" ? "builtin_rpc" : obj.sourceType || (obj.unavailable ? "builtin_rpc" : obj.preset ? "builtin_sql" : "custom_sql");
 export const outputDimensions = (item) => item.draft.fields.filter((f) => f.role === "dimension");
@@ -51,7 +52,7 @@ function field(alias, extra = {}) {
 export function newItem(kind = "metric", ownerAbilityId = "") {
   const isDimension = kind === "dimension";
   return {
-    id: uid("item"), key: uid(isDimension ? "dimension" : "query"), name: isDimension ? "自定义消费分层" : "自定义订单表现",
+    id: uid("item"), key: "", name: isDimension ? "自定义消费分层" : "自定义订单表现",
     description: isDimension ? "按用户历史消费金额定义分层，取自实验前示例用户快照。" : "观察支付表现；指标由 SQL 直接计算。",
     kind, ownerAbilityId, preset: false, sourceType: "custom_sql", archived: false,
     keyLocked: false, savedAt: "", versions: [], runs: [],
@@ -126,8 +127,8 @@ export function presetItems() {
 }
 export function newAbility(name = "未命名取数能力") {
   return {
-    id: uid("ability"), key: uid("capability"), keyLocked: false, name,
-    goal: "平台老客提频", owner: currentActor, description: "", sourceType: "custom_sql", archived: false,
+    id: uid("ability"), key: "", keyLocked: false, name,
+    goal: businessGoal, description: "", sourceType: "custom_sql", archived: false,
     metrics: [], dimensions: [], groups: [], includeOverall: true,
     context: clone(defaultContext), scenario: "normal", savedAt: "", runs: [], versions: []
   };
@@ -179,13 +180,18 @@ export function loadComposer() {
     obj.sourceType ||= obj.unavailable ? "builtin_rpc" : obj.preset ? "builtin_sql" : "custom_sql";
     obj.archived ??= false;
     obj.keyLocked ||= Boolean(obj.savedAt || obj.versions.length);
+    // Earlier builds allocated editable keys on creation. Unsaved drafts have
+    // no public system key; saved keys and immutable published snapshots stay.
+    if (!obj.savedAt && !obj.versions.length) { obj.key = ""; obj.keyLocked = false; }
     obj.updatedAt ||= obj.savedAt || obj.versions.at(-1)?.publishedAt || "";
   }
   for (const ability of store.abilities) {
-    if (ability.owner === "DS / 分析师") ability.owner = currentActor;
+    delete ability.owner;
+    ability.goal = businessGoal;
     for (const group of ability.groups) completeGroup(group);
     syncQueryGroups(store, ability);
   }
+  store.analysis.goal = businessGoal;
   return store;
 }
 export function hasDrillSlots(item) {
@@ -235,7 +241,7 @@ export function itemCurrentRun(item, context) {
 export function abilityDefinition(store, ability) {
   return clone({
     id: ability.id, key: ability.key, name: ability.name, description: ability.description,
-    goal: ability.goal, owner: ability.owner, includeOverall: ability.includeOverall,
+    goal: ability.goal, includeOverall: ability.includeOverall,
     metrics: ability.metrics.map((ref) => ({ ...ref, definition: resolveItem(store, ref) })),
     dimensions: ability.dimensions.map((ref) => ({ ...ref, definition: resolveItem(store, ref) })),
     groups: ability.groups
@@ -263,7 +269,7 @@ export function abilityCurrentRun(store, ability) {
 export function itemIssues(item) {
   const d = item.draft, errors = [];
   if (!item.name.trim() || !item.description.trim()) errors.push("补齐取数项名称和说明。");
-  if (!identifier(item.key)) errors.push("稳定 Key 须为英文、数字与下划线。");
+  if ((item.key || item.savedAt) && !identifier(item.key)) errors.push("系统 Key 异常，请重新保存取数项。");
   if (item.unavailable) errors.push(item.unavailable);
   if (!d.sql.trim() || d.parsedSql !== d.sql || d.parseError) errors.push("当前 SQL 需要成功解析。");
   if (d.removed.length) errors.push("有删除或重命名输出需要确认。");
@@ -298,10 +304,9 @@ export function itemIssues(item) {
 }
 export function abilityIssues(store, ability) {
   const errors = [];
-  if (!ability.name.trim() || !ability.description.trim() || !ability.owner.trim()) errors.push("补齐能力名称、负责人和说明。");
+  if (!ability.name.trim() || !ability.description.trim()) errors.push("补齐能力名称和说明。");
   if (!businessGoals.includes(ability.goal)) errors.push("请选择平台已有业务目标。");
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(ability.owner)) errors.push("负责人填写用户邮箱前缀。");
-  if (!identifier(ability.key) || store.abilities.some((a) => a.id !== ability.id && a.key === ability.key)) errors.push("能力 Key 格式不合法或重复。");
+  if (ability.key && (!identifier(ability.key) || store.abilities.some((a) => a.id !== ability.id && a.key === ability.key))) errors.push("系统 Key 异常，请重新保存能力。");
   if (!ability.metrics.length || !ability.metrics.some((r) => r.metricKeys.length)) errors.push("至少选择一个实际指标。");
   if (!ability.includeOverall && !ability.groups.length) errors.push("至少保留整体或一个下钻组。");
   const dimKeys = [];

@@ -6,6 +6,7 @@ import {
 } from "./composer-data.js";
 import { parameterCatalog } from "./prototype-data.js";
 import { sqlQuery, parseMode, normalize, analyze } from "./prototype-engine.js";
+import { saveDraft } from "./composer-management.js";
 
 const bare = (sql) => sql.trim().replace(/;\s*$/, "");
 const removeSlots = (sql) => slots.reduce((text, slot) => text.replaceAll(`{{${slot}}}`, ""), sql);
@@ -271,6 +272,7 @@ function alterResult(result, mode, scenario) {
   if (scenario === "no_control") result.rows = result.rows.filter((r) => r[result.columns.indexOf("is_control")] !== 1);
 }
 export async function runItem(item, context, scenario = "normal", changed = () => {}) {
+  if (!item.key && sourceType(item) === "custom_sql" && !item.archived) saveDraft(item);
   const snapshot = itemDefinition(item);
   const record = { id: uid("itemrun"), status: "running", startedAt: now(), snapshot, context: clone(context), scenario,
     querySignature: itemQuerySignature(item, context), approvedFor: "", error: "" };
@@ -295,6 +297,7 @@ export async function runItem(item, context, scenario = "normal", changed = () =
 }
 export function itemPublishIssues(item, context, scenario = "normal") {
   const issues = itemIssues(item), run = itemCurrentRun(item, context);
+  if (!item.key) issues.push("请先保存 SQL，系统将自动生成 Key。");
   if (scenario !== "normal" || run?.scenario !== "normal") issues.push("恢复正常场景并重新运行后发布。");
   if (!run) issues.push("当前 SQL 与配置需要有结构合格且非空的独立运行。");
   else if (run.approvedFor !== itemReviewSignature(item, context)) issues.push("请核对当前输出定义和运行结果。");
@@ -323,6 +326,7 @@ export function attachItem(store, item, ability, number) {
   return ability;
 }
 export async function runAbility(store, ability, changed = () => {}) {
+  if (!ability.archived && sourceType(ability) === "custom_sql" && (!ability.key || [...ability.metrics, ...ability.dimensions].some((ref) => !ref.version && !store.items.find((item) => item.id === ref.itemId)?.key))) saveDraft(ability, store);
   syncQueryGroups(store, ability);
   const record = { id: uid("abilityrun"), startedAt: now(), status: "running", signature: abilityQuerySignature(store, ability),
     context: clone(ability.context), scenario: ability.scenario, records: [], modes: [], approvedFor: "", error: "" };
@@ -353,6 +357,7 @@ export async function runAbility(store, ability, changed = () => {}) {
 export function abilityPublishIssues(store, ability) {
   syncQueryGroups(store, ability);
   const issues = abilityIssues(store, ability), run = abilityCurrentRun(store, ability);
+  if (!ability.key) issues.push("请先保存能力，系统将自动生成 Key。");
   if (ability.archived) issues.push("已归档能力不能发布新版本。");
   if (ability.scenario !== "normal") issues.push("恢复正常场景并重新整体试跑后发布。");
   if (!run) issues.push("当前能力的全部整体与下钻组合需要完成非空试跑。");
