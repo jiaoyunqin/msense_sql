@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(root, "dist");
-const output = path.join(root, "deliverables/msense-sql-prototype-v3/msense-sql-composer.html");
+const output = process.argv[2] ? path.resolve(process.argv[2]) : path.join(root, "deliverables/msense-sql-prototype-v3/msense-sql-composer.html");
 const html = await fs.readFile(path.join(dist, "index.html"), "utf8");
 const entry = html.match(/<script\b[^>]*\bsrc="([^"]+)"[^>]*><\/script>/);
 const style = html.match(/<link\b[^>]*\bhref="([^"]+\.css)"[^>]*>/);

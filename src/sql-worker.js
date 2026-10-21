@@ -1,8 +1,15 @@
-import initSqlJs from "sql.js/dist/sql-asm.js";
+import initSqlJs from "sql.js/dist/sql-wasm.js";
+import wasmDataURL from "sql.js/dist/sql-wasm.wasm?url&inline";
 import { parameterCatalog, defaultContext } from "./prototype-data.js";
 
 // This database contains generated fixtures only. There is no network or production connection.
-const database = initSqlJs().then((SQL) => {
+let database;
+function getDatabase() {
+  return database ||= Promise.resolve().then(async () => {
+  // Inline binary keeps the worker self-contained and gives SQLite its own WASM
+  // stack instead of relying on a browser's JavaScript stack for asm.js execution.
+  const binary = Uint8Array.from(atob(wasmDataURL.split(",")[1]), (character) => character.charCodeAt(0));
+  const SQL = await initSqlJs({ wasmBinary: binary });
   const db = new SQL.Database();
   db.run(`CREATE TABLE demo_users (user_id TEXT PRIMARY KEY, historical_spend REAL, lifecycle TEXT, city_id INTEGER);
     CREATE TABLE demo_orders (order_id TEXT, user_id TEXT, libra_id INTEGER, pgdp_experiment_id TEXT,
@@ -33,7 +40,8 @@ const database = initSqlJs().then((SQL) => {
   orderStmt.free();
   db.run("PRAGMA query_only = ON");
   return db;
-});
+  });
+}
 
 // Lexical masking protects literal/comment boundaries. SQLite, not this scanner, checks SQL grammar.
 function maskSQL(sql) {
@@ -141,7 +149,7 @@ function outputSources(sql, columns) {
 
 self.onmessage = async ({ data: { id, sql, bindings = [], context = {}, parsing = false } }) => {
   try {
-    const db = await database;
+    const db = await getDatabase();
     const { rendered, params } = bindSQL(sql, bindings, context, parsing);
     const stmt = db.prepare(rendered);
     try {

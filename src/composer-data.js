@@ -1,4 +1,5 @@
 import { clone, uid, hash, definitions, defaultContext } from "./prototype-data.js";
+import demoFixture from "./composer-demo.json";
 
 export { clone, uid, hash, defaultContext };
 export const COMPOSER_KEY = "msense-composer-v2";
@@ -126,14 +127,8 @@ export function newAbility(name = "未命名取数能力") {
 }
 function initialStore() {
   const items = presetItems();
-  const ability = newAbility("优惠券效果取数");
-  ability.description = "选择支付与订单核销指标，按消费力、生命周期或自定义维度观察表现。";
-  ability.metrics = [{ ...makeReference(items[0]), metricKeys: ["gmv", "order_count"] }, { ...makeReference(items[1]), metricKeys: ["redemption_rate"] }];
-  const existing = newAbility("核心指标汇总");
-  existing.description = "已有取数能力的本地示例；添加 SQL 取数项会保留当前指标配置。";
-  existing.metrics = [{ ...makeReference(items[0]), metricKeys: ["gmv", "order_count", "user_count"] }];
   return {
-    schema: 2, items: [...items, newItem("metric")], abilities: [ability, existing],
+    schema: 2, items, abilities: [],
     analysis: {
       name: "优惠券效果分析", description: "核对支付与订单核销表现。", goal: "平台老客提频",
       capabilityId: "", version: 0, selections: {}, reasoning: "比较所选指标和实际分层数据，不判断显著性或因果。",
@@ -141,6 +136,20 @@ function initialStore() {
       context: clone(defaultContext), scenario: "normal", savedAt: "", attempts: []
     }
   };
+}
+function addPublishedDemo(store) {
+  if (store.demoSeedRevision === demoFixture.revision) return store;
+  for (const item of demoFixture.items) if (!store.items.some((existing) => existing.id === item.id)) store.items.push(clone(item));
+  if (!store.abilities.some((existing) => existing.id === demoFixture.ability.id)) store.abilities.push(clone(demoFixture.ability));
+  if (!store.analysis.capabilityId) {
+    const oldAttempts = store.analysis.attempts;
+    store.analysis = clone(demoFixture.analysis);
+    store.analysis.attempts.push(...oldAttempts.filter((a) => !store.analysis.attempts.some((existing) => existing.id === a.id)));
+  } else if (!store.analysis.attempts.some((a) => a.id === "demo-sql-analysis")) {
+    store.analysis.attempts.push(clone(demoFixture.analysis.attempts[0]));
+  }
+  store.demoSeedRevision = demoFixture.revision;
+  return store;
 }
 export function loadComposer() {
   try {
@@ -154,10 +163,10 @@ export function loadComposer() {
         d.enumEdited ??= false;
         d.enumValues ??= [];
       }
-      return saved;
+      return addPublishedDemo(saved);
     }
   } catch { /* Storage failure must not make the page unusable. */ }
-  return initialStore();
+  return addPublishedDemo(initialStore());
 }
 export function hasDrillSlots(item) {
   return slots.every((slot) => item.draft.sql.includes(`{{${slot}}}`));
