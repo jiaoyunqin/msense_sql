@@ -1,4 +1,5 @@
 import { clone, uid, hash, definitions, defaultContext, parameterCatalog } from "./prototype-data.js";
+import { metricFields, metricIssues, metricQueryConfig } from "./composer-metrics.js";
 import demoFixture from "./composer-demo.json";
 
 export { clone, uid, hash, defaultContext };
@@ -12,6 +13,16 @@ export const businessGoals = [businessGoal];
 export const sourceType = (obj) => obj.id === "preset-summary-only" ? "builtin_rpc" : obj.sourceType || (obj.unavailable ? "builtin_rpc" : obj.preset ? "builtin_sql" : "custom_sql");
 export const outputDimensions = (item) => item.draft.fields.filter((f) => f.role === "dimension");
 export const directQuery = (item) => item.kind === "metric" && !hasDrillSlots(item);
+export const activeGroups = (ability) => ability.groups.filter((g) => g.enabled !== false && (!g.queryItemId || ability.metrics.some((r) => r.itemId === g.queryItemId && r.metricKeys.length)));
+export const showsOverall = (ability) => ability.showOverall ?? true;
+export const builtinDimensionOwners = { "preset-spend": ["preset-payment", "preset-redemption"] };
+export const dimensionCategory = (item) => builtinDimensionOwners[item.id] ? "builtin" : sourceType(item) === "custom_sql" ? "custom" : "public";
+export const dimensionCategoryLabels = { builtin: "指标内置", public: "公共维度", custom: "自定义 SQL" };
+export const knownDimensionValues = {
+  "preset-spend": ["高消费力", "中消费力", "低消费力"],
+  "preset-lifecycle": ["新客", "成熟老客"],
+  "preset-city": [100, 101, 102]
+};
 export const entities = { user: { name: "用户", column: "user_id" }, order: { name: "订单", column: "order_id" } };
 export const dimensionSQL = {
   spend_tier: `SELECT user_id AS entity_id,
@@ -129,7 +140,7 @@ export function newAbility(name = "未命名取数能力") {
   return {
     id: uid("ability"), key: "", keyLocked: false, name,
     goal: businessGoal, description: "", sourceType: "custom_sql", archived: false,
-    metrics: [], dimensions: [], groups: [], includeOverall: true,
+    metrics: [], dimensions: [], groups: [], includeOverall: true, showOverall: true,
     context: clone(defaultContext), scenario: "normal", savedAt: "", runs: [], versions: []
   };
 }
@@ -230,7 +241,8 @@ export function itemQuerySignature(item, context) {
   return hash({
     sql: d.sql, parameters: d.parameters, entity: d.entity, entityColumn: d.entityColumn, sourceAlias: d.sourceAlias,
     dimensionKey: d.dimensionKey, idAlias: d.idAlias, valueAlias: d.valueAlias, valueType: d.valueType, timing: d.timing,
-    fields: d.fields.map(({ alias, key, role, type, description }) => ({ alias, key, role, type, description })), context
+    fields: d.fields.map(({ alias, key, role, type, description }) => ({ alias, key, role, type, description })),
+    ...(item.kind === "metric" && metricQueryConfig(item) ? { metrics: metricQueryConfig(item) } : {}), context
   });
 }
 export function itemReviewSignature(item, context) {
@@ -243,7 +255,7 @@ export function itemCurrentRun(item, context) {
 export function abilityDefinition(store, ability) {
   return clone({
     id: ability.id, key: ability.key, name: ability.name, description: ability.description,
-    goal: ability.goal, includeOverall: ability.includeOverall,
+    goal: ability.goal, includeOverall: ability.includeOverall, showOverall: showsOverall(ability),
     metrics: ability.metrics.map((ref) => ({ ...ref, definition: resolveItem(store, ref) })),
     dimensions: ability.dimensions.map((ref) => ({ ...ref, definition: resolveItem(store, ref) })),
     groups: ability.groups
@@ -259,7 +271,7 @@ export function abilityQuerySignature(store, ability) {
       metrics: ability.metrics.map((ref) => ({ itemId: ref.itemId, version: ref.version, metricKeys: ref.metricKeys, query: itemQuerySignature(resolveItem(store, ref), ability.context) })),
       dimensions: ability.dimensions.map((ref) => ({ itemId: ref.itemId, version: ref.version, query: itemQuerySignature(resolveItem(store, ref), ability.context) })),
       includeOverall: ability.includeOverall,
-      groups: ability.groups.map(({ id, cross, members, queryItemId }) => ({ id, cross, members, ...(queryItemId ? { queryItemId } : {}) })),
+      groups: activeGroups(ability).map(({ id, cross, members, queryItemId, valueFilters }) => ({ id, cross, members, ...(queryItemId ? { queryItemId } : {}), ...(valueFilters && Object.keys(valueFilters).length ? { valueFilters } : {}) })),
       context: ability.context, scenario: ability.scenario
     });
   } catch { return "invalid-reference"; }
@@ -291,9 +303,8 @@ export function itemIssues(item) {
     if (!d.fields.some((f) => f.alias === d.idAlias) || !d.fields.some((f) => f.alias === d.valueAlias)) errors.push("选择实际输出的实体 ID 列和维度值列。");
     if ((d.enumValues || []).some((value) => value !== null && typeof value !== d.valueType)) errors.push("枚举候选值须符合维度原生类型，数字枚举请填写数字。");
   } else {
-    const metrics = d.fields.filter((f) => f.role === "metric");
     if (hasDrillSlots(item) && outputDimensions(item).length) errors.push("含维度输出的完整 SQL 请移除模板位置；维度按实际输出声明。");
-    if (!metrics.length) errors.push("至少定义一个 SQL 最终指标。");
+    errors.push(...metricIssues(item));
     if (new Set(d.fields.map((f) => f.key)).size !== d.fields.length) errors.push("输出 Key 重复。");
     for (const f of d.fields) {
       if (!identifier(f.key) || !f.name.trim() || !f.description.trim() || f.role === "pending" || f.type === "unknown") errors.push(`${f.alias}：补齐 Key、名称、口径、角色与类型。`);
@@ -310,21 +321,41 @@ export function abilityIssues(store, ability) {
   if (!businessGoals.includes(ability.goal)) errors.push("请选择平台已有业务目标。");
   if (ability.key && (!identifier(ability.key) || store.abilities.some((a) => a.id !== ability.id && a.key === ability.key))) errors.push("系统 Key 异常，请重新保存能力。");
   if (!ability.metrics.length || !ability.metrics.some((r) => r.metricKeys.length)) errors.push("至少选择一个实际指标。");
-  if (!ability.includeOverall && !ability.groups.length) errors.push("至少保留整体或一个下钻组。");
+  const groups = activeGroups(ability);
+  if ((!ability.includeOverall || !showsOverall(ability)) && !groups.length) errors.push("至少展示整体数据或一种维度拆分。");
   const dimKeys = [];
   for (const ref of [...ability.metrics, ...ability.dimensions]) {
     try {
       const item = resolveItem(store, ref);
       errors.push(...itemIssues(item).map((message) => `${item.name}：${message}`));
       if (ref.metricKeys) {
-        if (ref.metricKeys.some((key) => !item.draft.fields.some((f) => f.key === key && f.role === "metric"))) errors.push(`${item.name}：所选指标不在当前引用输出中。`);
+        if (ref.metricKeys.some((key) => !metricFields(item).some((f) => f.key === key))) errors.push(`${item.name}：所选指标不在当前引用输出中。`);
       } else dimKeys.push(item.draft.dimensionKey);
     } catch (error) { errors.push(error.message); }
   }
   if (new Set(dimKeys).size !== dimKeys.length) errors.push("维度 Key 重复，不能区分成员来源。");
   if (new Set(ability.groups.map((g) => completeGroup(g).key)).size !== ability.groups.length) errors.push("下钻组 Key 重复。");
-  for (const group of ability.groups) {
+  const grains = new Set();
+  for (const group of groups) {
+    const grain = group.queryItemId ? `query:${group.queryItemId}` : [...group.members].sort().join("|");
+    if (grains.has(grain)) errors.push(`${group.name}：已存在相同的维度拆分。`);
+    grains.add(grain);
     if (!identifier(completeGroup(group).key)) errors.push(`${group.name}：下钻 Key 不合法。`);
+    let fields = [];
+    try {
+      fields = group.queryItemId
+        ? outputDimensions(resolveItem(store, ability.metrics.find((r) => r.itemId === group.queryItemId)))
+        : group.members.flatMap((id) => {
+          const ref = ability.dimensions.find((r) => r.itemId === id);
+          if (!ref) return [];
+          const d = resolveItem(store, ref).draft;
+          return [{ key: d.dimensionKey, type: d.valueType }];
+        });
+    } catch { /* Missing references are reported above. */ }
+    for (const [key, values] of Object.entries(group.valueFilters || {})) {
+      const f = fields.find((f) => f.key === key);
+      if (!f || !Array.isArray(values) || !values.length || values.some((v) => v !== null && (typeof v !== f.type || (typeof v === "number" && !Number.isFinite(v))))) errors.push(`${group.name}：拆解取值为空或与维度类型不符，请重新选择。`);
+    }
     if (group.queryItemId) {
       const ref = ability.metrics.find((r) => r.itemId === group.queryItemId && r.metricKeys.length);
       if (!ref) continue;
@@ -335,11 +366,14 @@ export function abilityIssues(store, ability) {
       continue;
     }
     if (!group.name.trim() || group.members.length !== new Set(group.members).size || group.members.some((id) => !ability.dimensions.some((d) => d.itemId === id))) errors.push(`${group.name || "下钻组"}：成员缺失、重复或尚未加入维度配置。`);
-    if (group.cross ? group.members.length < 2 : group.members.length !== 1) errors.push(`${group.name}：单维选择一个成员，交叉至少选择两个不同成员。`);
+    if (group.cross ? group.members.length < 2 || group.members.length > 4 : group.members.length !== 1) errors.push(`${group.name}：单维选择一个成员，交叉支持 2–4 个不同维度。`);
     for (const ref of ability.metrics.filter((r) => r.metricKeys.length)) {
       try {
         const item = resolveItem(store, ref);
-        if (directQuery(item)) continue;
+        if (directQuery(item)) {
+          errors.push(`${group.name}：${item.name} 缺少此粒度的 SQL 变体，请补充可下钻 SQL 模板。`);
+          continue;
+        }
         if (!hasDrillSlots(item)) errors.push(`${item.name}：没有可下钻的 SQL 模板位置，只支持实际整体输出。`);
         for (const id of group.members) {
           const dimRef = ability.dimensions.find((d) => d.itemId === id);

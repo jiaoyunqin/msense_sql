@@ -472,7 +472,7 @@ capabilityList.addEventListener("click", (event) => {
   if (event.target.closest(".run-button")) {
     const selection = catalogSelection.get(panel.dataset.capabilityId);
     if (!selection?.metrics.length) { showToast("请先选择至少一个指标"); return; }
-    location.hash = `/trial/preset/${panel.dataset.capabilityId}`;
+    prototype.openTrial("preset", panel.dataset.capabilityId);
   }
 });
 

@@ -2,11 +2,12 @@ import {
   clone, uid, hash, slots, identifier, entities, itemDefinition, resolveItem,
   itemIssues, abilityIssues, itemQuerySignature, itemReviewSignature, itemCurrentRun,
   abilityDefinition, abilitySignature, abilityQuerySignature, abilityCurrentRun,
-  directQuery, outputDimensions, syncQueryGroups, completeGroup, currentActor, sourceType
+  directQuery, outputDimensions, syncQueryGroups, completeGroup, currentActor, sourceType, activeGroups, showsOverall
 } from "./composer-data.js";
 import { parameterCatalog } from "./prototype-data.js";
 import { sqlQuery, parseMode, normalize, analyze } from "./prototype-engine.js";
 import { saveDraft } from "./composer-management.js";
+import { compileMetrics, metricFields, syncMetrics } from "./composer-metrics.js";
 
 const bare = (sql) => sql.trim().replace(/;\s*$/, "");
 const removeSlots = (sql) => slots.reduce((text, slot) => text.replaceAll(`{{${slot}}}`, ""), sql);
@@ -87,15 +88,18 @@ export async function parseItem(item) {
       if (!snapshot.fields.length && !d.dimensionKeyEdited && d.valueAlias) d.dimensionKey = d.valueAlias;
       d.valueCandidates = values;
       d.parseSample = result.columns.map((alias, index) => ({
-        alias, type: result.types[index], values: [...new Set(result.rows.map((row) => row[index]))]
+        alias, type: result.types[index], values: result.values?.[index] || []
       }));
       d.sampleTruncated = result.truncated;
     } else {
+      d.parseSample = result.columns.map((alias, index) => ({
+        alias, type: result.types[index], values: result.values?.[index] || []
+      }));
       mode.fields = mode.fields.map((f) => f.alias === "avg_order_value" && f.role === "pending" && !snapshot.fields.some((old) => old.alias === f.alias)
         ? { ...f, name: "平均订单金额", role: "metric", type: "number", format: "currency", unit: "元", description: "支付金额总和 / 支付订单记录数，由 SQL 按实际粒度计算。" } : f);
       // Types offer an editable starting point, never a fixed business role.
       mode.fields = mode.fields.map((f) => f.role === "pending" && !snapshot.fields.some((old) => old.alias === f.alias)
-        ? { ...f, role: f.type === "string" ? "dimension" : "metric", description: f.description || `SQL 输出：${f.source}` } : f);
+        ? { ...f, role: ["user_id", "order_id", "entity_id", "date", "app_id"].includes(f.alias) ? "auxiliary" : f.type === "string" ? "dimension" : "metric", description: f.description || `SQL 输出：${f.source}` } : f);
     }
     mode.parameters.forEach((parameter) => {
       const initial = snapshot.parameters.find((p) => p.name === parameter.name);
@@ -107,6 +111,7 @@ export async function parseItem(item) {
       parsedSql: snapshot.sql, parseError: ""
     });
     if (item.kind === "dimension") syncDimension(item);
+    else syncMetrics(item);
     return result;
   } catch (error) {
     if (stale()) return { stale: true };
@@ -153,7 +158,7 @@ function sourceSQL(item) {
   }
   throw new Error("metric_source 明细来源未闭合。");
 }
-export function compileMode(metric, dimensions = [], selectedKeys, group) {
+function compileRawMode(metric, dimensions = [], selectedKeys, group) {
   const d = metric.draft;
   if (directQuery(metric)) {
     if (dimensions.length) throw new Error("完整 SQL 按已声明的维度取数；其他下钻请提供对应 SQL。");
@@ -205,17 +210,39 @@ export function compileMode(metric, dimensions = [], selectedKeys, group) {
     parameters: mergedBindings([metric, ...dimensions]), sourceDefinitions: clone([metric, ...dimensions])
   };
 }
+export function compileMode(metric, dimensions = [], selectedKeys, group) {
+  const mode = compileMetrics(compileRawMode(metric, dimensions, undefined, group), metric, selectedKeys), clauses = [];
+  for (const [key, values] of Object.entries(group?.valueFilters || {})) {
+    const field = mode.fields.find((f) => f.role === "dimension" && f.key === key);
+    if (!field || !identifier(field.alias) || !Array.isArray(values) || !values.length) throw new Error("请重新选择有效的维度拆解取值。");
+    const conditions = values.map((value) => {
+      if (value === null) return `"${field.alias}" IS NULL`;
+      if (typeof value !== field.type || (typeof value === "number" && !Number.isFinite(value))) throw new Error(`${field.name}：拆解取值类型不匹配。`);
+      return `"${field.alias}" = ${typeof value === "number" ? value : `'${value.replaceAll("'", "''")}'`}`;
+    });
+    clauses.push(`(${conditions.join(" OR ")})`);
+  }
+  if (clauses.length) {
+    mode.sql = `SELECT * FROM (${bare(mode.sql)}) AS __dimension_result\nWHERE ${clauses.join(" AND ")}`;
+    mode.parsedSql = mode.sql;
+  }
+  return mode;
+}
 export function abilityModes(store, ability) {
   const definition = ability.metrics.some((ref) => ref.definition) ? clone(ability) : abilityDefinition(store, ability), modes = [];
-  const groups = [...(definition.includeOverall ? [{ id: "overall", name: "整体", members: [] }] : []), ...definition.groups.filter((g) => !g.queryItemId)];
+  const selected = activeGroups(definition), mappingGroups = selected.filter((g) => !g.queryItemId);
+  const groups = [...(definition.includeOverall ? [{ id: "overall", name: "整体", members: [] }] : []), ...mappingGroups];
   for (const ref of definition.metrics.filter((r) => r.metricKeys.length)) {
     if (directQuery(ref.definition)) {
+      if (mappingGroups.length) throw new Error(`${ref.definition.name} 缺少“${mappingGroups[0].name}”粒度的 SQL 变体，请补充可下钻 SQL 模板。`);
       const dims = outputDimensions(ref.definition);
-      const group = dims.length ? definition.groups.find((g) => g.queryItemId === ref.itemId) : undefined;
-      if (dims.length && !group) throw new Error(`${ref.definition.name}：需要确认实际维度输出。`);
-      if (group || definition.includeOverall) modes.push(compileMode(ref.definition, [], ref.metricKeys, group));
+      const configured = definition.groups.find((g) => g.queryItemId === ref.itemId);
+      const group = dims.length ? selected.find((g) => g.queryItemId === ref.itemId) : undefined;
+      if (dims.length && !configured) throw new Error(`${ref.definition.name}：需要确认实际维度输出。`);
+      if (group || (!dims.length && definition.includeOverall)) modes.push(compileMode(ref.definition, [], ref.metricKeys, group));
     } else {
       for (const group of groups) {
+        if (group.cross && (group.members.length < 2 || group.members.length > 4)) throw new Error(`${group.name}：交叉支持 2–4 个不同维度。`);
         const dimensions = group.members.map((id) => definition.dimensions.find((r) => r.itemId === id)?.definition);
         if (dimensions.some((d) => !d)) throw new Error(`${group.name}：维度来源缺失。`);
         modes.push(compileMode(ref.definition, dimensions, ref.metricKeys, group));
@@ -319,7 +346,7 @@ export function attachItem(store, item, ability, number) {
   const definition = number ? item.versions.find((v) => v.number === number).definition : itemDefinition(item);
   if (!number) item.ownerAbilityId = ability.id;
   collection.push({ itemId: item.id, version: number, ...(item.kind === "metric" ? {
-    metricKeys: definition.draft.fields.filter((f) => f.role === "metric").map((f) => f.key)
+    metricKeys: metricFields(definition).map((f) => f.key)
   } : {}) });
   if (item.kind === "dimension") ability.groups.push(completeGroup({ id: uid("drill"), name: definition.draft.dimensionName, cross: false, members: [item.id] }));
   syncQueryGroups(store, ability);
@@ -382,7 +409,8 @@ export function useVersion(store, ability, number) {
   const m = store.analysis;
   if (ability.archived && (m.capabilityId !== ability.id || m.version !== number)) throw new Error("已归档能力不能新增分析引用。");
   if (m.capabilityId !== ability.id || m.version !== number) {
-    m.selections = Object.fromEntries(version.modes.map((mode) => [mode.id, mode.fields.filter((f) => f.role === "metric").map((f) => f.key)]));
+    m.showOverall = showsOverall(version.definition);
+    m.selections = Object.fromEntries(version.modes.map((mode) => [mode.id, mode.kind === "overall" && !m.showOverall ? [] : mode.fields.filter((f) => f.role === "metric").map((f) => f.key)]));
   }
   m.capabilityId = ability.id; m.version = number;
 }

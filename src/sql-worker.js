@@ -105,11 +105,11 @@ function bindSQL(sql, bindings, context, parsing) {
       seen.add(name);
     }
     if (!source && !parsing) throw new Error(`参数 ${name} 未绑定，不能试跑。`);
-    if (source && source.type !== type) throw new Error(`参数 ${name} 声明类型 ${type} 与来源 ${source.type} 不兼容。`);
+    if (!parsing && source && source.type !== type) throw new Error(`参数 ${name} 声明类型 ${type} 与来源 ${source.type} 不兼容。`);
     if (type.endsWith("_list") && !listUsage) throw new Error(`列表参数 ${name} 需要用于 IN (...)。`);
     // Unknown aliases get a typed syntax-check sample, never a runtime fallback.
     const sample = { number: "1", number_list: "1,2", date: "2026-10-01", string: "demo" };
-    return literal(source ? (parsing ? defaultContext[source.key] : context[source.key]) : sample[type], type, name);
+    return literal(parsing ? (source?.type === type ? defaultContext[source.key] : sample[type]) : context[source.key], type, name);
   });
   if (!parsing) {
     const requiredDates = params.some((p) => ["start_date", "end_date"].includes(p.source));
@@ -147,6 +147,32 @@ function outputSources(sql, columns) {
   };
 }
 
+// Static output hints only: preparing a query checks grammar without stepping it.
+// Ambiguous expressions stay unknown for DS confirmation and runtime validation.
+function staticOutput(source, alias) {
+  const expression = source.replace(/\s+AS\s+[a-zA-Z_]\w*\s*$/i, "").trim();
+  const schema = {
+    user_id: "string", order_id: "string", libra_id: "number", pgdp_experiment_id: "string",
+    group_id: "string", group_name: "string", is_control: "number", version_id: "number",
+    order_date: "string", coupon_meta_id: "number", pay_amount: "number", redeemed: "number",
+    historical_spend: "number", lifecycle: "string", city_id: "number"
+  };
+  const values = [];
+  if (/^CASE\b/i.test(expression)) {
+    for (const match of expression.matchAll(/\b(?:THEN|ELSE)\s+('(?:''|[^'])*'|-?\d+(?:\.\d+)?|NULL)(?=\s|$)/gi)) {
+      values.push(/^NULL$/i.test(match[1]) ? null : match[1].startsWith("'") ? match[1].slice(1, -1).replaceAll("''", "'") : Number(match[1]));
+    }
+    const types = [...new Set(values.filter((v) => v !== null).map((v) => typeof v))];
+    return { type: types.length === 1 ? types[0] : "unknown", values: [...new Set(values)] };
+  }
+  if (/^'(?:''|[^'])*'$/.test(expression)) return { type: "string", values: [expression.slice(1, -1).replaceAll("''", "'")] };
+  if (/^-?\d+(?:\.\d+)?$/.test(expression)) return { type: "number", values: [Number(expression)] };
+  if (/\bCAST\s*\([\s\S]*\bAS\s+(TEXT|CHAR|VARCHAR)\s*\)/i.test(expression)) return { type: "string", values };
+  if (/\bCAST\s*\([\s\S]*\bAS\s+(INTEGER|REAL|NUMERIC|FLOAT|DOUBLE)\s*\)/i.test(expression) || /\b(COUNT|SUM|AVG|TOTAL)\s*\(/i.test(expression)) return { type: "number", values };
+  const column = expression.match(/^(?:[a-zA-Z_]\w*\.)?([a-zA-Z_]\w*)$/)?.[1];
+  return { type: schema[column || (source.startsWith("来源无法") ? alias : "")] || "unknown", values };
+}
+
 self.onmessage = async ({ data: { id, sql, bindings = [], context = {}, parsing = false } }) => {
   try {
     const db = await getDatabase();
@@ -157,6 +183,12 @@ self.onmessage = async ({ data: { id, sql, bindings = [], context = {}, parsing 
       if (!columns.length) throw new Error("查询未输出字段。");
       if (new Set(columns).size !== columns.length) throw new Error("SQL 输出别名重复；请明确每个字段的唯一 AS 别名。");
       if (columns.some((c) => !/^[a-zA-Z_]\w*$/.test(c))) throw new Error("请为计算表达式添加英文 AS 别名。");
+      const metadata = outputSources(sql, columns);
+      if (parsing) {
+        const hints = columns.map((alias, i) => staticOutput(metadata.sources[i], alias));
+        self.postMessage({ id, ok: true, columns, rows: [], truncated: false, types: hints.map((h) => h.type), values: hints.map((h) => h.values), params, rendered, ...metadata });
+        return;
+      }
       const rows = [];
       while (stmt.step() && rows.length <= 500) rows.push(stmt.get());
       const truncated = rows.length > 500;
@@ -165,7 +197,7 @@ self.onmessage = async ({ data: { id, sql, bindings = [], context = {}, parsing 
         const observed = [...new Set(values.map((v) => typeof v))];
         return observed.length === 1 && ["number", "string"].includes(observed[0]) ? observed[0] : "unknown";
       });
-      self.postMessage({ id, ok: true, columns, rows: rows.slice(0, 500), truncated, types, params, rendered, ...outputSources(sql, columns) });
+      self.postMessage({ id, ok: true, columns, rows: rows.slice(0, 500), truncated, types, params, rendered, ...metadata });
     } finally { stmt.free(); }
   } catch (error) {
     self.postMessage({ id, ok: false, error: `${error.message}（本地 SQLite；无法精确定位行列）` });

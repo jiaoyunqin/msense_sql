@@ -1,4 +1,5 @@
 import { hash, uid, itemDefinition, abilityDefinition, sourceType, currentActor, businessGoal } from "./composer-data.js";
+import { metricFields } from "./composer-metrics.js";
 
 export const sourceLabels = {
   builtin_rpc: ["内置 RPC", "blue"],
@@ -24,17 +25,23 @@ function content(definition) {
         unit: f.unit || "", nullDisplay: f.nullDisplay || "—", controlDash: Boolean(f.controlDash),
         entity: f.entity || "", timing: f.timing || ""
       })),
+      ...(definition.kind === "metric" ? { metrics: metricFields(definition).map((m) => ({
+        alias: m.alias, key: m.key, name: m.name, calculation: m.calculation, valueAlias: m.valueAlias,
+        aggregation: m.aggregation, denominatorAlias: m.denominatorAlias, denominatorAggregation: m.denominatorAggregation,
+        description: m.description, format: m.format, precision: Number(m.precision ?? 2),
+        unit: m.unit || "", nullDisplay: m.nullDisplay || "—", controlDash: Boolean(m.controlDash)
+      })) } : {}),
       parameters: d.parameters.map((p) => ({ name: p.name, source: p.source, expectedType: p.expectedType, listUsage: Boolean(p.listUsage) }))
     };
   }
   return {
     key: definition.key, name: definition.name, description: definition.description,
-    goal: definition.goal, includeOverall: definition.includeOverall,
+    goal: definition.goal, includeOverall: definition.includeOverall, showOverall: definition.showOverall ?? true,
     metrics: definition.metrics.map((r) => ({ itemId: r.itemId, version: r.version, metricKeys: r.metricKeys, definition: content(r.definition) })),
     dimensions: definition.dimensions.map((r) => ({ itemId: r.itemId, version: r.version, definition: content(r.definition) })),
     groups: definition.groups.map((g) => ({
       id: g.id, key: g.key || `drill_${g.id.replace(/\W/g, "_")}`, name: g.name, description: g.description || "",
-      cross: g.cross, members: g.members, ...(g.queryItemId ? { queryItemId: g.queryItemId } : {})
+      cross: g.cross, members: g.members, enabled: g.enabled !== false, valueFilters: g.valueFilters || {}, ...(g.queryItemId ? { queryItemId: g.queryItemId } : {})
     }))
   };
 }

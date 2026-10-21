@@ -2,6 +2,7 @@ import {
   clone, uid, newAbility, newItem, itemDefinition, abilityDefinition,
   defaultContext, sourceType, completeGroup, syncQueryGroups, resolveItem
 } from "./composer-data.js";
+import { metricFields } from "./composer-metrics.js";
 
 export const configTypes = { ability: "取数能力", item: "SQL 取数项", preset: "预置能力" };
 
@@ -24,7 +25,7 @@ export function configSummary(config) {
   if (kind === "preset") return `${s.title} · ${s.metrics.length} 个指标 · ${s.dimensions.length} 个下钻维度`;
   if (kind === "item") {
     const d = s.definition;
-    return `${d.name} · ${d.kind === "dimension" ? "SQL 维度" : `${d.draft.fields.filter((f) => f.role === "metric").length} 个指标`}`;
+    return `${d.name} · ${d.kind === "dimension" ? "SQL 维度" : `${metricFields(d).length} 个指标`}`;
   }
   const d = s.definition;
   return `${d.metrics.reduce((n, r) => n + r.metricKeys.length, 0)} 个指标 · ${d.dimensions.length} 个维度来源 · ${d.groups.length} 个下钻组`;
@@ -69,6 +70,7 @@ export function instantiateConfig(store, config) {
   const d = s.definition, obj = newAbility(config.name), copies = [], mapping = new Map();
   obj.description = d.description;
   obj.includeOverall = d.includeOverall;
+  obj.showOverall = d.showOverall ?? true;
   obj.context = clone(s.context);
   obj.scenario = s.scenario;
   const copyReference = (ref) => {
