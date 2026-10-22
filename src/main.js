@@ -1,6 +1,7 @@
 import { createIcons, icons } from "lucide";
 import "./style.css";
 import { mountComposer } from "./composer-ui.js";
+import { businessGoal } from "./composer-data.js";
 
 const capabilities = [
   {
@@ -107,7 +108,7 @@ const capabilities = [
     ],
     dimensions: ["实验分组"]
   }
-];
+].map((capability) => ({ ...capability, sourceType: "builtin_rpc", goal: businessGoal }));
 
 const sidebarGroups = [
   {
@@ -215,21 +216,9 @@ app.innerHTML = `
           </header>
 
           <div class="catalog-toolbar">
-            <label class="form-field">
-              <span>业务目标</span>
-              <span class="business-control">
-                <button class="select-button" type="button">
-                  <span>平台老客提频</span>
-                  <i data-lucide="chevron-down"></i>
-                </button>
-                <button class="small-icon-button clear-business" type="button" aria-label="清除业务目标" title="清除">
-                  <i data-lucide="x"></i>
-                </button>
-              </span>
-            </label>
             <label class="search-field toolbar-search">
               <i data-lucide="search"></i>
-              <input id="catalog-search" type="search" placeholder="搜索能力、指标或维度" />
+              <input id="catalog-search" type="search" aria-label="搜索能力名称、Key、指标或维度" placeholder="搜索能力名称、Key、指标或维度" />
             </label>
           </div>
 
@@ -267,25 +256,12 @@ const catalogSelection = new Map();
 const expansion = new Map([["experiment-config", true]]);
 let prototype;
 
-function renderCards(query = "") {
-  const normalized = query.trim().toLocaleLowerCase("zh-CN");
-  const filtered = capabilities.filter((capability) => {
-    const haystack = [
-      capability.title,
-      capability.description,
-      ...capability.metrics.flat(),
-      ...capability.dimensions
-    ]
-      .join(" ")
-      .toLocaleLowerCase("zh-CN");
-    return haystack.includes(normalized);
-  });
-
-  capabilityList.innerHTML = filtered
+function renderCards() {
+  capabilityList.innerHTML = capabilities
     .map((capability) => cardTemplate(capability, expansion.get(capability.id) || false))
     .join("");
   capabilityList.querySelectorAll(".capability-panel").forEach(updatePanelSelection);
-  document.querySelector("#empty-results").hidden = filtered.length > 0;
+  document.querySelector("#empty-results").hidden = capabilities.length > 0;
   createIcons({ icons });
 }
 
@@ -295,24 +271,27 @@ function cardTemplate(capability, expanded) {
       capability.id
     }">
       <header class="capability-summary">
-        <button class="summary-button" type="button" aria-expanded="${expanded}">
-          <span class="capability-type">取数能力</span>
-          <strong>${capability.title}</strong>
-          <span class="selected-summary">已选 0 个指标</span>
-        </button>
+        <div class="c-catalog-heading">
+          <button class="summary-button" type="button" aria-expanded="${expanded}">
+            <span class="capability-type">取数能力</span>
+            <strong title="${capability.title}">${capability.title}</strong>
+            <span class="selected-summary">提供 ${capability.metrics.length} 个指标</span>
+          </button>
+          <div class="c-catalog-meta" aria-label="来源、版本和更新时间"></div>
+        </div>
         <span class="summary-actions">
-          <button class="outline-button run-button" type="button">
+          <button class="outline-button expand-button" type="button" aria-expanded="${expanded}" aria-controls="details-${capability.id}">
+            <i data-lucide="${expanded ? "chevron-up" : "eye"}"></i>
+            <span>${expanded ? "收起" : "查看"}</span>
+          </button>
+          <span class="c-action-hint" tabindex="0" title="请先在查看中选择至少一个指标" aria-label="请先在查看中选择至少一个指标"><button class="outline-button run-button" type="button" disabled>
             <i data-lucide="flask-conical"></i>
             试跑
-          </button>
-          <button class="outline-button expand-button" type="button" aria-expanded="${expanded}">
-            <i data-lucide="${expanded ? "chevron-up" : "chevron-down"}"></i>
-            <span>${expanded ? "收起" : "展开"}</span>
-          </button>
+          </button></span>
         </span>
       </header>
 
-      <div class="capability-content" ${expanded ? "" : "hidden"}>
+      <div class="capability-content" id="details-${capability.id}" ${expanded ? "" : "hidden"}>
         <div class="capability-details">
           <p>${capability.description}</p>
           <dl class="selection-overview">
@@ -382,13 +361,6 @@ function cardTemplate(capability, expanded) {
             }
           </section>
         </div>
-        <div class="c-config-toolbar">
-          <span>复用取数配置</span>
-          <div class="p-actions">
-            <button class="p-button" type="button" data-action="config-load">载入已有取数配置</button>
-            <button class="p-button" type="button" data-action="config-save" data-preset="${capability.id}"><i data-lucide="bookmark-plus"></i>保存取数配置</button>
-          </div>
-        </div>
       </div>
     </article>
   `;
@@ -409,8 +381,8 @@ function setExpanded(panel, expanded) {
   content.hidden = !expanded;
   summaryButton.setAttribute("aria-expanded", String(expanded));
   expandButton.setAttribute("aria-expanded", String(expanded));
-  expandButton.querySelector("span").textContent = expanded ? "收起" : "展开";
-  icon?.replaceWith(iconPlaceholder(expanded ? "chevron-up" : "chevron-down"));
+  expandButton.querySelector("span").textContent = expanded ? "收起" : "查看";
+  icon?.replaceWith(iconPlaceholder(expanded ? "chevron-up" : "eye"));
   refreshIcons();
 }
 
@@ -432,7 +404,13 @@ function updatePanelSelection(panel) {
   });
   prototype?.syncPresetSelection(panel.dataset.capabilityId, catalogSelection.get(panel.dataset.capabilityId));
 
-  panel.querySelector(".selected-summary").textContent = `已选 ${checkedMetrics.length} 个指标`;
+  panel.querySelector(".selected-summary").textContent = `提供 ${totalMetrics} 个指标`;
+  const runButton = panel.querySelector(".run-button"), hint = runButton.parentElement;
+  runButton.disabled = !checkedMetrics.length;
+  hint.title = checkedMetrics.length ? `试跑已选的 ${checkedMetrics.length} 个指标` : "请先在查看中选择至少一个指标";
+  hint.setAttribute("aria-label", hint.title);
+  if (checkedMetrics.length) hint.removeAttribute("tabindex");
+  else hint.setAttribute("tabindex", "0");
   panel.querySelector(".group-count").textContent = `已选 ${checkedMetrics.length}/${totalMetrics}`;
   panel.querySelector(".dimension-count").textContent = `已选 ${checkedDimensions.length}/${totalDimensions}`;
   panel.querySelector(".overview-value").textContent = metricNames.length
@@ -451,7 +429,7 @@ function showToast(message) {
 }
 
 capabilityList.addEventListener("click", (event) => {
-  const panel = event.target.closest(".capability-panel");
+  const panel = event.target.closest("[data-capability-id]");
   if (!panel) return;
 
   if (event.target.closest(".summary-button") || event.target.closest(".expand-button")) {
@@ -477,7 +455,7 @@ capabilityList.addEventListener("click", (event) => {
 });
 
 capabilityList.addEventListener("change", (event) => {
-  const panel = event.target.closest(".capability-panel");
+  const panel = event.target.closest("[data-capability-id]");
   if (panel && event.target.matches("input[type='checkbox']")) updatePanelSelection(panel);
 });
 
@@ -488,14 +466,6 @@ capabilityList.addEventListener("input", (event) => {
   panel.querySelectorAll(".metric-group .selection-option").forEach((option) => {
     option.hidden = !option.textContent.toLocaleLowerCase("zh-CN").includes(query);
   });
-});
-
-document.querySelector("#catalog-search").addEventListener("input", (event) => {
-  renderCards(event.target.value);
-});
-
-document.querySelector(".clear-business").addEventListener("click", () => {
-  document.querySelector(".select-button span").textContent = "请选择业务目标";
 });
 
 document.querySelector(".sidebar-toggle").addEventListener("click", () => {
@@ -546,6 +516,12 @@ prototype = mountComposer({
   applyPresetSelection(id, selection, expand = false) {
     catalogSelection.set(id, selection);
     if (expand) expansion.set(id, true);
-    renderCards(document.querySelector("#catalog-search").value);
+    const panel = capabilityList.querySelector(`[data-capability-id="${id}"]`);
+    if (panel) {
+      panel.querySelectorAll(".metric-group input[type='checkbox']").forEach((el) => { el.checked = selection.metrics.includes(el.value); });
+      panel.querySelectorAll(".dimension-group input[type='checkbox']").forEach((el) => { el.checked = selection.dimensions.includes(el.value); });
+      if (expand) setExpanded(panel, true);
+      updatePanelSelection(panel);
+    }
   }
 });

@@ -223,7 +223,7 @@ export function compileMode(metric, dimensions = [], selectedKeys, group) {
     clauses.push(`(${conditions.join(" OR ")})`);
   }
   if (clauses.length) {
-    mode.sql = `SELECT * FROM (${bare(mode.sql)}) AS __dimension_result\nWHERE ${clauses.join(" AND ")}`;
+    mode.sql = `SELECT * FROM (${bare(mode.sql)}\n) AS __dimension_result\nWHERE ${clauses.join(" AND ")}`;
     mode.parsedSql = mode.sql;
   }
   return mode;

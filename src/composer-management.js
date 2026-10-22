@@ -1,4 +1,4 @@
-import { hash, uid, itemDefinition, abilityDefinition, sourceType, currentActor, businessGoal } from "./composer-data.js";
+import { hash, uid, itemDefinition, abilityDefinition, sourceType, currentActor, businessGoal, resolveItem, activeGroups, outputDimensions } from "./composer-data.js";
 import { metricFields } from "./composer-metrics.js";
 
 export const sourceLabels = {
@@ -60,6 +60,44 @@ export function matchesState(store, obj, filter) {
   if (filter === "all") return state !== "archived";
   if (filter === "published") return !obj.archived && obj.versions.length > 0;
   return state === filter;
+}
+export function catalogPublicationState(store, obj) {
+  if (!obj.title) return publicationState(store, obj);
+  if (obj.archived) return "archived";
+  return obj.versions?.length ? "published" : "unknown";
+}
+export function catalogSearchText(store, obj) {
+  const terms = [obj.name || obj.title, obj.key || (obj.title ? obj.id : ""), obj.description];
+  if (obj.title) {
+    terms.push(...obj.metrics.flat(), ...obj.dimensions);
+  } else {
+    const groups = activeGroups(obj);
+    for (const ref of obj.metrics) {
+      try {
+        const definition = resolveItem(store, ref);
+        for (const field of metricFields(definition).filter((f) => ref.metricKeys.includes(f.key)))
+          terms.push(field.name, field.key, field.description);
+        if (groups.some((g) => g.queryItemId === ref.itemId))
+          for (const field of outputDimensions(definition)) terms.push(field.name, field.key);
+      } catch { /* Missing references remain discoverable by module name or Key. */ }
+    }
+    for (const ref of obj.dimensions.filter((r) => groups.some((g) => !g.queryItemId && g.members.includes(r.itemId)))) {
+      try {
+        const { draft } = resolveItem(store, ref);
+        terms.push(draft.dimensionName, draft.dimensionKey);
+      } catch { /* The existing configuration validator reports invalid references. */ }
+    }
+  }
+  return terms.join(" ").toLocaleLowerCase("zh-CN");
+}
+export function matchesCatalog(store, obj, { search = "", source = "all", goal = "all", state = "all" } = {}) {
+  if (source !== "all" && sourceType(obj) !== source) return false;
+  if (goal !== "all" && obj.goal !== goal) return false;
+  const publication = catalogPublicationState(store, obj);
+  if (state === "all" ? publication === "archived"
+    : state === "published" ? publication === "archived" || !obj.versions?.length
+    : publication !== state) return false;
+  return catalogSearchText(store, obj).includes(search.trim().toLocaleLowerCase("zh-CN"));
 }
 export function trackChanges(store) {
   for (const obj of [...store.items, ...store.abilities]) {
