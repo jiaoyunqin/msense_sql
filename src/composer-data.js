@@ -365,6 +365,10 @@ export function abilityIssues(store, ability) {
       } catch (error) { errors.push(error.message); }
       continue;
     }
+    for (const id of group.members) {
+      const owners = builtinDimensionOwners[id];
+      if (owners && !ability.metrics.some((r) => r.metricKeys.length && owners.includes(r.itemId))) errors.push(`${group.name}：请保留该维度所属的内置指标组，或复制为自定义 SQL 维度。`);
+    }
     if (!group.name.trim() || group.members.length !== new Set(group.members).size || group.members.some((id) => !ability.dimensions.some((d) => d.itemId === id))) errors.push(`${group.name || "下钻组"}：成员缺失、重复或尚未加入维度配置。`);
     if (group.cross ? group.members.length < 2 || group.members.length > 4 : group.members.length !== 1) errors.push(`${group.name}：单维选择一个成员，交叉支持 2–4 个不同维度。`);
     for (const ref of ability.metrics.filter((r) => r.metricKeys.length)) {

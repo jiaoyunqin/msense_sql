@@ -175,7 +175,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         return {
           id: s.id, ref, category: dimensionCategory(s), name: d.draft.dimensionName, key: d.draft.dimensionKey, definition: d,
           detail: dimensionCategory(s) === "builtin" ? metrics.filter((m) => builtinDimensionOwners[s.id].includes(m.id)).map((m) => m.name).join("、") || "已关联的指标内置维度" : d.description,
-          reason: !metrics.length ? "请先选择指标" : fixed ? `${fixed.name} 未提供此粒度的 SQL 变体` : metrics.some((m) => m.draft.entity !== d.draft.entity) ? "与所选指标的关联实体不同" : ""
+          reason: !metrics.length ? "请先选择指标" : builtinDimensionOwners[s.id] && !metrics.some((m) => builtinDimensionOwners[s.id].includes(m.id)) ? "请先选择该维度所属的内置指标组" : fixed ? `${fixed.name} 未提供此粒度的 SQL 变体` : metrics.some((m) => m.draft.entity !== d.draft.entity) ? "与所选指标的关联实体不同" : ""
         };
       });
     for (const ref of ability.metrics.filter((r) => r.metricKeys.length)) {
@@ -225,16 +225,27 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     const p = dimensionPicker, cross = p.target !== "single";
     return `<div class="c-dimension-picker" role="dialog" aria-label="选择维度"><header><strong>${cross ? "选择交叉成员" : "选择下钻维度"}</strong>${btn("dimension-picker-close", "", "x", "link", 'aria-label="关闭维度选择"')}</header><label class="search-field">${icon("search")}<input type="search" data-model="dimension-search" aria-label="搜索维度" placeholder="搜索维度名称或 Key" value="${esc(p.search)}"></label><div class="c-dimension-picker-body"><nav aria-label="维度来源">${Object.entries(dimensionCategoryLabels).map(([key, name]) => `<button type="button" data-action="dimension-tab" data-id="${key}" aria-pressed="${key === p.tab}" class="${key === p.tab ? "active" : ""}">${name}</button>`).join("")}</nav><div id="dimension-picker-options">${dimensionPickerRows()}</div></div><footer><span id="dimension-picker-count">${cross ? "最多交叉 4 个维度" : "多选时分别取数"}</span>${btn("dimension-picker-confirm", "添加所选", "check", "primary")}</footer></div>`;
   }
+  function dimensionReferencesHTML(group) {
+    const kind = group.queryItemId ? "metric" : "dimension";
+    const ids = group.queryItemId ? [group.queryItemId] : group.members;
+    return ids.map((id) => {
+      const ref = (kind === "metric" ? ability.metrics : ability.dimensions).find((r) => r.itemId === id);
+      const origin = store.items.find((s) => s.id === id);
+      if (!ref || !origin) return "";
+      const options = [...(origin.ownerAbilityId === ability.id ? [[0, "能力内草稿"]] : []), ...origin.versions.map((v) => [v.number, `已发布 v${v.number}`])];
+      return `<div class="c-dimension-reference"><span>${esc(resolveItem(store, ref).name)}</span>${select("引用版本", `ref.${kind}.${id}`, options, ref.version, `aria-label="${esc(origin.name)} 维度引用版本"`)}${btn("edit-source", ref.version ? "查看 / 复制 SQL" : "编辑 SQL", "square-pen", "link", `data-id="${id}" data-version="${ref.version}"`)}</div>`;
+    }).join("");
+  }
   function dimensionsHTML() {
     const groups = activeGroups(ability);
-    return `<div class="c-dimension-toolbar"><label class="c-overall-switch"><input type="checkbox" role="switch" data-model="ability.showOverall" ${showsOverall(ability) ? "checked" : ""} ${hasOverallData() ? "" : "disabled"}><span class="c-switch-track"></span><span>展示不拆分维度的数据</span></label>${!hasOverallData() && ability.metrics.length ? '<span class="c-dimension-note">当前指标未提供整体 SQL</span>' : ""}<div class="p-actions">${btn("new-owned-dimension", "SQL 维度", "code-2", "link")}${btn("dimension-pick-single", "添加维度", "plus")}${btn("dimension-pick-cross", "交叉维度", "combine", "", 'title="最多支持交叉 4 个维度"')}</div></div><div class="c-dimension-anchor">${dimensionPickerHTML()}</div>
+    return `<div class="c-dimension-toolbar"><label class="c-overall-switch"><input type="checkbox" role="switch" data-model="ability.showOverall" ${hasOverallData() && showsOverall(ability) ? "checked" : ""} ${hasOverallData() ? "" : "disabled"}><span class="c-switch-track"></span><span>展示不拆分维度的数据</span></label>${!hasOverallData() && ability.metrics.some((r) => r.metricKeys.length) ? '<span class="c-dimension-note">当前指标未提供整体 SQL</span>' : ""}<div class="p-actions">${btn("new-owned-dimension", "SQL 维度", "code-2", "link")}${btn("dimension-pick-single", "添加维度", "plus")}${btn("dimension-pick-cross", "交叉维度", "combine", "", 'title="最多支持交叉 4 个维度"')}</div></div><div class="c-dimension-anchor">${dimensionPickerHTML()}</div>
       <div class="c-dimension-cards">${groups.length ? groups.map((g) => {
         const dims = groupDimensions(g);
         return `<article class="c-dimension-card ${g.cross ? "is-cross" : ""}" data-group-id="${g.id}"><header><span>${g.cross ? icon("combine") + "交叉维度" : "单维拆分"}${g.queryItemId ? badge("SQL 已定义粒度", "purple") : ""}</span>${btn("dimension-remove-group", "", "x", "link", `data-id="${g.id}" aria-label="移除 ${esc(g.name)}"`)}</header>${dims.map((d) => {
           const selected = g.valueFilters?.[d.key], values = selected || d.values;
           return `<div class="c-dimension-row"><div class="c-dimension-name"><strong>${esc(d.name)}</strong><small>${dimensionCategoryLabels[d.category]}</small></div><button type="button" class="c-dimension-values" data-action="dimension-values" data-id="${g.id}" data-key="${esc(d.key)}" aria-label="选择 ${esc(d.name)} 的拆解取值"><span>拆解</span>${values.length ? values.slice(0, 3).map((v) => `<b>${esc(v === null ? "NULL" : v)}</b>`).join("") + (values.length > 3 ? `<b>+${values.length - 3}</b>` : "") : "<b>全部取值</b>"}${!selected && values.length ? '<small>全部</small>' : ""}${icon("chevron-down")}</button>${g.cross && !g.queryItemId ? btn("dimension-remove-member", "", "x", "link", `data-id="${g.id}" data-member="${d.itemId}" aria-label="移除交叉成员 ${esc(d.name)}"`) : ""}</div>`;
         }).join("")}${g.cross && !g.queryItemId && dims.length < 4 ? btn("dimension-pick-member", "请选择维度", "plus", "link c-add-cross-member", `data-id="${g.id}"`) : ""}
-        <details class="c-dimension-settings"><summary>更多设置</summary><div class="p-form-grid two">${input("名称", `group.${g.id}.name`, g.name)}${input("说明（选填）", `group.${g.id}.description`, g.description)}</div>${ability.savedAt ? readonlyField("Key（系统生成）", g.key) : ""}<div class="p-actions">${btn("view-group-sql", "查看 SQL", "code-2", "link", `data-id="${g.id}"`)}${!g.queryItemId && dims.length === 1 ? btn("edit-source", "查看维度定义", "square-pen", "link", `data-id="${dims[0].itemId}" data-version="${ability.dimensions.find((r) => r.itemId === dims[0].itemId)?.version || 0}"`) : ""}</div></details></article>`;
+        <details class="c-dimension-settings"><summary>更多设置</summary><div class="p-form-grid two">${input("名称", `group.${g.id}.name`, g.name)}${input("说明（选填）", `group.${g.id}.description`, g.description)}</div>${ability.savedAt ? readonlyField("Key（系统生成）", g.key) : ""}${dimensionReferencesHTML(g)}<div class="p-actions">${btn("view-group-sql", "查看 SQL", "code-2", "link", `data-id="${g.id}"`)}</div></details></article>`;
       }).join("") : '<div class="c-dimensions-empty">添加维度，查看指标在不同人群中的分布</div>'}</div>`;
   }
   function refreshDimensions() {
@@ -259,6 +270,13 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     dimensionPicker.tab = available.find((d) => !d.reason)?.category || available[0]?.category || "public";
     refreshDimensions(); refreshDimensionOptions();
     outlet.querySelector('[data-model="dimension-search"]')?.focus({ preventScroll: true });
+  }
+  function closeDimensionPicker() {
+    const target = dimensionPicker?.target;
+    dimensionPicker = undefined; refreshDimensions();
+    const action = target === "single" ? "dimension-pick-single" : target === "new" ? "dimension-pick-cross" : "dimension-pick-member";
+    const trigger = [...outlet.querySelectorAll(`[data-action="${action}"]`)].find((el) => action !== "dimension-pick-member" || el.dataset.id === target);
+    trigger?.focus({ preventScroll: true });
   }
   function valuePickerHTML() {
     const d = valueDraft;
@@ -813,7 +831,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       if (a === "dimension-pick-single" || a === "dimension-pick-cross" || a === "dimension-pick-member") {
         openDimensionPicker(a === "dimension-pick-single" ? "single" : a === "dimension-pick-cross" ? "new" : id); return;
       }
-      if (a === "dimension-picker-close") { dimensionPicker = undefined; refreshDimensions(); return; }
+      if (a === "dimension-picker-close") { closeDimensionPicker(); return; }
       if (a === "dimension-tab") { dimensionPicker.tab = id; refreshDimensions(); refreshDimensionOptions(); return; }
       if (a === "dimension-picker-confirm") {
         const p = dimensionPicker, options = dimensionOptions(), selected = p.selected.map((id) => options.find((d) => d.id === id));
@@ -950,6 +968,10 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
           ability.groups.forEach((g) => {
             g.members = g.members.map((member) => member === id ? s.id : member);
             if (g.queryItemId === id) g.queryItemId = s.id;
+            if (s.kind === "dimension" && g.valueFilters?.[source.draft.dimensionKey]) {
+              g.valueFilters[s.draft.dimensionKey] = g.valueFilters[source.draft.dimensionKey];
+              delete g.valueFilters[source.draft.dimensionKey];
+            }
           });
           syncQueryGroups(store, ability);
         }
@@ -1274,13 +1296,21 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   for (const event of ["input", "change"]) document.querySelector(".app-shell").addEventListener(event, handleModel);
   document.addEventListener("keydown", (e) => {
     const activeOverlay = !overlay.hidden ? overlay : !trialOverlay.hidden ? trialOverlay : null;
-    if (!activeOverlay) return;
+    if (!activeOverlay) {
+      if (dimensionPicker && e.key === "Escape") { e.preventDefault(); closeDimensionPicker(); }
+      return;
+    }
     if (e.key === "Escape") { e.preventDefault(); if (activeOverlay === overlay) closeDialog(); else closeTrial(); }
     if (e.key === "Tab") {
       const focusable = [...activeOverlay.querySelectorAll('[role="dialog"] button:not(:disabled), [role="dialog"] input:not(:disabled), [role="dialog"] textarea:not(:disabled), [role="dialog"] select:not(:disabled), [role="dialog"] a[href], [role="dialog"] summary')].filter((el) => el.getClientRects().length);
       const first = focusable[0], last = focusable.at(-1);
       if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+    }
+  });
+  document.addEventListener("pointerdown", (e) => {
+    if (dimensionPicker && overlay.hidden && trialOverlay.hidden && !e.target.closest('.c-dimension-picker, [data-action^="dimension-pick"]')) {
+      dimensionPicker = undefined; outlet.querySelector(".c-dimension-picker")?.remove();
     }
   });
   document.querySelector("#catalog-search").addEventListener("input", renderCatalog);
