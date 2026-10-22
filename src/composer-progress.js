@@ -1,5 +1,5 @@
 import {
-  clone, defaultContext, sourceType, itemIssues, abilityIssues,
+  clone, defaultContext, canEditDefinition, itemIssues, abilityIssues,
   itemCurrentRun, itemQuerySignature, itemReviewSignature,
   abilityCurrentRun, abilityQuerySignature, abilitySignature
 } from "./composer-data.js";
@@ -40,9 +40,8 @@ export function publicationProgress(obj) {
 }
 
 function progress(obj, configIssues, publishIssues, currentRun, summary, reviewed, standalone = true) {
-  const readOnly = Boolean(obj.archived) || sourceType(obj) !== "custom_sql";
-  if (sourceType(obj) !== "custom_sql") publishIssues.push("内置定义只读，不能发布新版本。");
-  if (obj.archived && !publishIssues.includes("已归档能力不能发布新版本。")) publishIssues.push("已归档对象不能发布新版本。");
+  const readOnly = !canEditDefinition(obj);
+  if (readOnly) publishIssues.push("仅创建人可以发布新版本。");
   const canTrial = configIssues.length === 0, hasRuns = Boolean(obj.runs?.length);
   return {
     canTrial, canPublish: standalone && !readOnly && publishIssues.length === 0,

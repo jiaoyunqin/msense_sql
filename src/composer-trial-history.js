@@ -1,8 +1,10 @@
 import { trialRuns, trialRecordStatus, trialRecordTime, trialExperiment } from "./composer-trial-records.js";
+import { canViewHistory } from "./composer-data.js";
 
 const esc = (value = "") => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 
 function historyRows(obj) {
+  if (!canViewHistory(obj)) return "";
   return trialRuns(obj).map((run) => {
     const experiment = trialExperiment(run), label = experiment ? `实验 ${experiment}` : "实验未记录";
     const time = trialRecordTime(run), status = trialRecordStatus(run);
@@ -77,7 +79,7 @@ export function createTrialHistory(outlet) {
       objectId = id;
     }
     generation++;
-    const runs = trialRuns(obj);
+    const runs = canViewHistory(obj) ? trialRuns(obj) : [];
     if (!runs.length) {
       open = false; scroll = 0; revision = ""; pendingFocus = undefined;
       return "";
@@ -92,7 +94,7 @@ export function createTrialHistory(outlet) {
     // A catalog trial can run above a different owner's configuration page.
     if (!target || target.dataset.objectId !== String(obj.id)) return false;
     let details = currentDetails(), changed = false;
-    if (!trialRuns(obj).length || !details) {
+    if (!canViewHistory(obj) || !trialRuns(obj).length || !details) {
       const html = render(obj);
       if (target.innerHTML !== html) { target.innerHTML = html; changed = true; }
       details = currentDetails();

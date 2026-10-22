@@ -1,4 +1,5 @@
 import { publicationProgress } from "./composer-progress.js";
+import { canViewHistory } from "./composer-data.js";
 
 const esc = (value) => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const publishedTime = (value) => {
@@ -50,7 +51,7 @@ export function createPublicationHistory(outlet) {
     objectType = type;
     generation++;
     const progress = publicationProgress(obj);
-    if (!progress.hasVersions) {
+    if (!progress.hasVersions || !canViewHistory(obj)) {
       open = false;
       return "";
     }

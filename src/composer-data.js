@@ -8,9 +8,14 @@ export const identifier = (value) => /^[a-zA-Z_]\w*$/.test(value || "");
 export const slots = ["dimension_select", "dimension_join", "dimension_group"];
 export const currentActor = "sheriqin.01";
 export const businessGoal = "平台老客提频";
-export const businessGoals = [businessGoal];
+export const businessGoalOptions = [[businessGoal, "老客提频"]];
+export const businessGoals = businessGoalOptions.map(([value]) => value);
 // Older fixture snapshots predate source metadata; keep their known RPC origin.
 export const sourceType = (obj) => obj.id === "preset-summary-only" ? "builtin_rpc" : obj.sourceType || (obj.unavailable ? "builtin_rpc" : obj.preset ? "builtin_sql" : "custom_sql");
+export const isCreator = (obj, actor = currentActor) => Boolean(obj?.createdBy && obj.createdBy === actor);
+export const canEditDefinition = (obj, actor = currentActor) => Boolean(obj && sourceType(obj) !== "builtin_rpc"
+  && isCreator(obj, actor) && !obj.readOnly && !obj.readonly && !Object.isFrozen(obj));
+export const canViewHistory = (obj, actor = currentActor) => Boolean(obj && sourceType(obj) !== "builtin_rpc" && isCreator(obj, actor));
 export const outputDimensions = (item) => item.draft.fields.filter((f) => f.role === "dimension");
 export const directQuery = (item) => item.kind === "metric" && !hasDrillSlots(item);
 export const activeGroups = (ability) => ability.groups.filter((g) => g.enabled !== false && (!g.queryItemId || ability.metrics.some((r) => r.itemId === g.queryItemId && r.metricKeys.length)));
@@ -65,7 +70,7 @@ export function newItem(kind = "metric", ownerAbilityId = "") {
   return {
     id: uid("item"), key: "", name: isDimension ? "自定义消费分层" : "自定义订单表现",
     description: isDimension ? "按用户历史消费金额定义分层，取自实验前示例用户快照。" : "观察支付表现；指标由 SQL 直接计算。",
-    kind, ownerAbilityId, preset: false, sourceType: "custom_sql", archived: false,
+    kind, ownerAbilityId, preset: false, sourceType: "custom_sql", createdBy: currentActor,
     keyLocked: false, savedAt: "", versions: [], runs: [],
     draft: {
       sql: isDimension ? dimensionSQL.spend_tier.replace("AS dimension_value", "AS spend_tier") : metricSQL(),
@@ -106,7 +111,7 @@ export function makeReference(item, version = item.versions.at(-1)?.number || 0)
 
 function preset(kind, id, name, sql, options = {}) {
   const item = newItem(kind);
-  Object.assign(item, { id, key: id.replaceAll("-", "_"), name, description: options.description || name, preset: true, sourceType: "builtin_sql", keyLocked: true });
+  Object.assign(item, { id, key: id.replaceAll("-", "_"), name, description: options.description || name, preset: true, sourceType: "builtin_sql", createdBy: "msense.system", keyLocked: true });
   Object.assign(item.draft, { sql, parsedSql: sql, ...options });
   if (kind === "metric") {
     item.draft.fields = ["group_id", "group_name", "is_control", ...options.metrics].map((alias) => field(alias,
@@ -139,8 +144,9 @@ export function presetItems() {
 export function newAbility(name = "未命名取数能力") {
   return {
     id: uid("ability"), key: "", keyLocked: false, name,
-    goal: businessGoal, description: "", sourceType: "custom_sql", archived: false,
+    goal: businessGoal, description: "", sourceType: "custom_sql", createdBy: currentActor,
     metrics: [], dimensions: [], groups: [], includeOverall: true, showOverall: true,
+    singleSqlFlow: false, sqlItemId: "", crossDimensions: [], parseStatus: "idle",
     context: clone(defaultContext), scenario: "normal", savedAt: "", runs: [], versions: []
   };
 }
@@ -189,7 +195,11 @@ export function loadComposer() {
   store = addPublishedDemo(store || initialStore());
   for (const obj of [...store.items, ...store.abilities]) {
     obj.sourceType ||= obj.unavailable ? "builtin_rpc" : obj.preset ? "builtin_sql" : "custom_sql";
-    obj.archived ??= false;
+    delete obj.archived;
+    // Existing browser-owned drafts belong to the current author. Built-in
+    // definitions without creator metadata never grant editing by default.
+    obj.createdBy ||= obj.versions[0]?.definition?.createdBy || obj.versions[0]?.operator
+      || (sourceType(obj) === "custom_sql" ? currentActor : "msense.system");
     obj.keyLocked ||= Boolean(obj.savedAt || obj.versions.length);
     // Earlier builds allocated editable keys on creation. Unsaved drafts have
     // no public system key; saved keys and immutable published snapshots stay.
@@ -198,7 +208,9 @@ export function loadComposer() {
   }
   for (const ability of store.abilities) {
     delete ability.owner;
-    ability.goal = businessGoal;
+    if (ability.goal == null) ability.goal = businessGoal;
+    ability.crossDimensions ||= [];
+    ability.parseStatus ||= "idle";
     for (const group of ability.groups) completeGroup(group);
     syncQueryGroups(store, ability);
   }
@@ -218,6 +230,11 @@ export function completeGroup(group) {
 // A full query owns its actual output grain. Register that grain once rather
 // than applying the same aggregate query to unrelated mapping-based groups.
 export function syncQueryGroups(store, ability) {
+  if (ability.singleSqlFlow) {
+    ability.dimensions = [];
+    ability.groups = [];
+    return;
+  }
   const live = new Set();
   for (const ref of ability.metrics) {
     let query;
@@ -256,6 +273,8 @@ export function abilityDefinition(store, ability) {
   return clone({
     id: ability.id, key: ability.key, name: ability.name, description: ability.description,
     goal: ability.goal, includeOverall: ability.includeOverall, showOverall: showsOverall(ability),
+    singleSqlFlow: Boolean(ability.singleSqlFlow), sqlItemId: ability.sqlItemId || "",
+    crossDimensions: ability.crossDimensions || [],
     metrics: ability.metrics.map((ref) => ({ ...ref, definition: resolveItem(store, ref) })),
     dimensions: ability.dimensions.map((ref) => ({ ...ref, definition: resolveItem(store, ref) })),
     groups: ability.groups
@@ -272,6 +291,7 @@ export function abilityQuerySignature(store, ability) {
       dimensions: ability.dimensions.map((ref) => ({ itemId: ref.itemId, version: ref.version, query: itemQuerySignature(resolveItem(store, ref), ability.context) })),
       includeOverall: ability.includeOverall,
       groups: activeGroups(ability).map(({ id, cross, members, queryItemId, valueFilters }) => ({ id, cross, members, ...(queryItemId ? { queryItemId } : {}), ...(valueFilters && Object.keys(valueFilters).length ? { valueFilters } : {}) })),
+      crossDimensions: ability.crossDimensions || [],
       context: ability.context, scenario: ability.scenario
     });
   } catch { return "invalid-reference"; }
@@ -316,6 +336,30 @@ export function itemIssues(item) {
   return errors;
 }
 export function abilityIssues(store, ability) {
+  if (ability.singleSqlFlow) {
+    const errors = [];
+    if (!ability.name.trim()) errors.push("请填写能力名称。");
+    if (!ability.description.trim()) errors.push("请填写能力说明。");
+    if (!businessGoals.includes(ability.goal)) errors.push("请选择平台已有业务目标。");
+    if (ability.name.trim().length > 50) errors.push("能力名称不能超过 50 个字。");
+    if (ability.description.trim().length > 200) errors.push("能力说明不能超过 200 个字。");
+    const reference = ability.metrics.find((candidate) => candidate.itemId === ability.sqlItemId) || ability.metrics[0];
+    let source;
+    try { source = resolveItem(store, reference); }
+    catch (error) { errors.push(error.message); }
+    if (source) {
+      const draft = source.draft;
+      if (!draft.sql.trim()) errors.push("请先输入完整 SQL 后再解析。");
+      else if (draft.parseError) errors.push("SQL 语法校验未通过，请根据编辑器提示修改后重试。");
+      else if (draft.parsedSql !== draft.sql) errors.push("当前 SQL 尚未完成解析，请先校验并解析 SQL。");
+      if (!metricFields(source).length) errors.push("未识别到可用指标，请检查 SQL 输出字段。");
+      if (outputDimensions(source).some((dimension) => !dimension.splitSql?.trim()))
+        errors.push("存在尚未生成完成的维度拆分 SQL。");
+      if ((ability.crossDimensions || []).some((cross) => cross.status !== "generated" || !cross.splitSql?.trim()))
+        errors.push("存在尚未生成完成的交叉维度 SQL。");
+    }
+    return [...new Set(errors)];
+  }
   const errors = [];
   if (!ability.name.trim() || !ability.description.trim()) errors.push("补齐能力名称和说明。");
   if (!businessGoals.includes(ability.goal)) errors.push("请选择平台已有业务目标。");

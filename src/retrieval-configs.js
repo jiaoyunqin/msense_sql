@@ -1,6 +1,6 @@
 import {
   clone, uid, newItem, newAbility, abilityDefinition, sourceType, completeGroup,
-  syncQueryGroups, resolveItem, directQuery, outputDimensions
+  syncQueryGroups, resolveItem, directQuery, outputDimensions, canEditDefinition
 } from "./composer-data.js";
 import { assertMutable } from "./composer-management.js";
 import { metricFields } from "./composer-metrics.js";
@@ -80,7 +80,7 @@ function checkDefinition(definition) {
 
 function pinnedReference(store, ref) {
   const item = store.items.find((candidate) => candidate.id === ref.itemId);
-  if (!item || item.archived || item.unavailable || sourceType(item) === "custom_sql"
+  if (!item || item.unavailable || sourceType(item) === "custom_sql"
     || !ref.version || !Array.isArray(item.versions))
     throw new Error(`内置来源“${ref.definition.name}”的固定版本已不可用。`);
   const definition = resolveItem(store, ref);
@@ -92,7 +92,6 @@ function pinnedReference(store, ref) {
 function readSource(store, target, sourceId) {
   const source = store.abilities.find((candidate) => candidate?.id === sourceId);
   if (!source || source.id === target?.id) throw new Error("来源能力已不存在或是当前能力，请重新选择。");
-  if (source.archived) throw new Error("来源能力已归档，请重新选择。");
   if (source.unavailable || sourceType(source) === "builtin_rpc")
     throw new Error("该内置能力只有固定样例，没有可载入的完整取数定义。");
   if (!text(source.name) || !text(source.description) || !Array.isArray(source.versions)) unreadable();
@@ -138,7 +137,7 @@ function assertTarget(store, target) {
     || !Array.isArray(store.items) || !Array.isArray(store.abilities))
     throw new Error("请先打开一个可编辑的取数能力。");
   assertMutable(target);
-  if (target.readOnly || target.readonly || target.preset || target.builtin || Object.isFrozen(target) || Object.isFrozen(store.items))
+  if (!canEditDefinition(target) || Object.isFrozen(store.items))
     throw new Error("当前能力只读，不能载入取数内容。");
   const referencedIds = new Set([...(target.metrics || []), ...(target.dimensions || [])].map((r) => r.itemId));
   const running = (obj) => obj.running || obj.status === "running" || obj.runs?.some((run) => run.status === "running");

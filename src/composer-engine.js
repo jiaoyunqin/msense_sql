@@ -2,11 +2,11 @@ import {
   clone, uid, hash, slots, identifier, entities, itemDefinition, resolveItem,
   itemIssues, abilityIssues, itemQuerySignature, itemReviewSignature, itemCurrentRun,
   abilityDefinition, abilitySignature, abilityQuerySignature, abilityCurrentRun,
-  directQuery, outputDimensions, syncQueryGroups, completeGroup, currentActor, sourceType, activeGroups, showsOverall
+  directQuery, outputDimensions, syncQueryGroups, completeGroup, currentActor, canEditDefinition, activeGroups, showsOverall
 } from "./composer-data.js";
 import { parameterCatalog } from "./prototype-data.js";
 import { sqlQuery, parseMode, normalize, analyze } from "./prototype-engine.js";
-import { saveDraft } from "./composer-management.js";
+import { assertMutable, saveDraft } from "./composer-management.js";
 import { compileMetrics, metricFields, syncMetrics } from "./composer-metrics.js";
 
 const bare = (sql) => sql.trim().replace(/;\s*$/, "");
@@ -62,6 +62,12 @@ export async function parseItem(item) {
   const stale = () => item.draft !== d || d.sql !== snapshot.sql || parseRequests.get(item) !== request;
   const upstreamChanged = snapshot.parsedSql && upstreamSQL(snapshot.parsedSql) !== upstreamSQL(snapshot.sql);
   const mode = { ...snapshot, sql: removeSlots(snapshot.sql), revision: 1 };
+  // Mock dimensions are added after syntax parsing, so they are not missing SQL
+  // outputs. Repeated parsing of the same query retains their editable labels.
+  const mocked = snapshot.mockDimensionsSeeded && snapshot.parsedSql === snapshot.sql
+    ? snapshot.fields.filter((field) => field.mockDimension) : [];
+  mode.fields = snapshot.fields.filter((field) => !field.mockDimension);
+  mode.removed = snapshot.removed.filter((field) => !field.mockDimension);
   try {
     const result = await parseMode(mode);
     if (stale()) return { stale: true };
@@ -110,6 +116,10 @@ export async function parseItem(item) {
       fields: mode.fields, parameters: mode.parameters, removed: mode.removed, diff: mode.diff,
       parsedSql: snapshot.sql, parseError: ""
     });
+    if (item.kind === "metric" && mocked.length && !outputDimensions(item).length) {
+      d.fields.push(...mocked.filter((field) => !d.fields.some((existing) =>
+        existing.alias === field.alias || existing.key === field.key)));
+    }
     if (item.kind === "dimension") syncDimension(item);
     else syncMetrics(item);
     return result;
@@ -228,8 +238,77 @@ export function compileMode(metric, dimensions = [], selectedKeys, group) {
   }
   return mode;
 }
+const quoteIdentifier = (value) => {
+  if (!identifier(value)) throw new Error(`SQL 输出字段 ${value || "未命名"} 不是有效标识。`);
+  return `"${value}"`;
+};
+function singleSqlResultSource(item, dimensions = []) {
+  const raw = bare(removeSlots(item.draft.sql));
+  const mocked = dimensions.filter((field) => field.mockDimension);
+  if (!mocked.length) return raw;
+  const columns = mocked.map((field) =>
+    `'${String(field.mockValue).replaceAll("'", "''")}' AS ${quoteIdentifier(field.alias)}`);
+  return `SELECT complete_sql_input.*,\n  ${columns.join(",\n  ")}\nFROM (\n${raw}\n) AS complete_sql_input`;
+}
+export function singleSqlSplitSQL(item, dimensionKeys = []) {
+  const dimensions = outputDimensions(item).filter((field) => dimensionKeys.includes(field.key));
+  if (dimensions.length !== dimensionKeys.length) throw new Error("所选维度已失效，请重新解析 SQL。");
+  const metrics = metricFields(item);
+  const identities = item.draft.fields.filter((field) => ["group_id", "group_name", "is_control"].includes(field.alias));
+  const aliases = new Set(item.draft.fields.map((field) => field.alias));
+  const metricExpression = (metric) => {
+    if (metric.alias === "avg_order_value" && aliases.has("gmv") && aliases.has("order_count"))
+      return `1.0 * SUM("gmv") / NULLIF(SUM("order_count"), 0) AS "avg_order_value"`;
+    return `SUM(${quoteIdentifier(metric.valueAlias || metric.alias)}) AS ${quoteIdentifier(metric.alias)}`;
+  };
+  const columns = [
+    ...identities.map((field) => quoteIdentifier(field.alias)),
+    ...dimensions.map((field) => quoteIdentifier(field.alias)),
+    ...metrics.map(metricExpression)
+  ];
+  const groups = [...identities, ...dimensions].map((field) => quoteIdentifier(field.alias));
+  return `SELECT
+  ${columns.join(",\n  ")}
+FROM (
+${singleSqlResultSource(item, dimensions).split("\n").map((line) => `  ${line}`).join("\n")}
+) AS complete_sql_result
+GROUP BY ${groups.join(", ")}
+ORDER BY "is_control" DESC${dimensions.length ? `, ${dimensions.map((field) => quoteIdentifier(field.alias)).join(", ")}` : ""};`;
+}
+function singleSqlModes(ability) {
+  const reference = ability.metrics.find((candidate) => candidate.itemId === ability.sqlItemId) || ability.metrics[0];
+  if (!reference?.definition) throw new Error("完整 SQL 定义不存在。");
+  const source = reference.definition;
+  const selectedKeys = reference.metricKeys?.length ? reference.metricKeys : metricFields(source).map((field) => field.key);
+  const metrics = metricFields(source).filter((field) => selectedKeys.includes(field.key));
+  const identities = source.draft.fields.filter((field) => ["group_id", "group_name", "is_control"].includes(field.alias));
+  const dimensions = outputDimensions(source);
+  const createMode = (id, name, members, sql) => ({
+    id, name, key: id, description: "",
+    sql, parsedSql: sql, parseError: "", removed: [], diff: [], revision: 1, runs: [],
+    kind: members.length > 1 ? "cross" : members.length ? "single" : "overall",
+    members, fields: clone([
+      ...identities,
+      ...dimensions.filter((field) => members.includes(field.key)),
+      ...metrics
+    ]),
+    parameters: mergedBindings([source]), sourceDefinitions: clone([source])
+  });
+  const modes = [createMode(`${source.id}__overall`, "整体", [], singleSqlSplitSQL(source))];
+  for (const dimension of dimensions) {
+    modes.push(createMode(`${source.id}__${dimension.key}`, dimension.name, [dimension.key],
+      dimension.splitSql || singleSqlSplitSQL(source, [dimension.key])));
+  }
+  for (const cross of ability.crossDimensions || []) {
+    if (cross.status !== "generated" || !cross.splitSql?.trim()) continue;
+    const members = [cross.leftDimensionKey, cross.rightDimensionKey];
+    modes.push(createMode(`${source.id}__${cross.id}`, cross.name, members, cross.splitSql));
+  }
+  return modes;
+}
 export function abilityModes(store, ability) {
   const definition = ability.metrics.some((ref) => ref.definition) ? clone(ability) : abilityDefinition(store, ability), modes = [];
+  if (definition.singleSqlFlow) return singleSqlModes(definition);
   const selected = activeGroups(definition), mappingGroups = selected.filter((g) => !g.queryItemId);
   const groups = [...(definition.includeOverall ? [{ id: "overall", name: "整体", members: [] }] : []), ...mappingGroups];
   for (const ref of definition.metrics.filter((r) => r.metricKeys.length)) {
@@ -299,7 +378,7 @@ function alterResult(result, mode, scenario) {
   if (scenario === "no_control") result.rows = result.rows.filter((r) => r[result.columns.indexOf("is_control")] !== 1);
 }
 export async function runItem(item, context, scenario = "normal", changed = () => {}) {
-  if (!item.key && sourceType(item) === "custom_sql" && !item.archived) saveDraft(item);
+  if (!item.key && canEditDefinition(item)) saveDraft(item);
   const snapshot = itemDefinition(item);
   const record = { id: uid("itemrun"), status: "running", startedAt: now(), snapshot, context: clone(context), scenario,
     querySignature: itemQuerySignature(item, context), approvedFor: "", error: "" };
@@ -331,14 +410,14 @@ export function itemPublishIssues(item, context, scenario = "normal") {
   return issues;
 }
 export function publishItem(item, context, scenario) {
-  if (sourceType(item) !== "custom_sql" || item.archived) throw new Error("只有未归档的自定义 SQL 可以发布。");
+  assertMutable(item);
   const issues = itemPublishIssues(item, context, scenario);
   if (issues.length) throw new Error(issues.join(" "));
   const version = { number: item.versions.length + 1, publishedAt: now(), operator: currentActor, operation: "发布 SQL", definition: itemDefinition(item), runId: itemCurrentRun(item, context).id };
   item.versions.push(version); item.keyLocked = true; return version;
 }
 export function attachItem(store, item, ability, number) {
-  if (item.archived || ability.archived) throw new Error("已归档对象不能新增关联。");
+  assertMutable(ability);
   if (!number && item.ownerAbilityId && item.ownerAbilityId !== ability.id) throw new Error("能力内草稿需先独立发布，才能被其他能力组复用。");
   if (number && !item.versions.some((v) => v.number === number)) throw new Error("需要选择已发布的取数项版本。");
   const collection = item.kind === "metric" ? ability.metrics : ability.dimensions;
@@ -353,7 +432,7 @@ export function attachItem(store, item, ability, number) {
   return ability;
 }
 export async function runAbility(store, ability, changed = () => {}) {
-  if (!ability.archived && sourceType(ability) === "custom_sql" && (!ability.key || [...ability.metrics, ...ability.dimensions].some((ref) => !ref.version && !store.items.find((item) => item.id === ref.itemId)?.key))) saveDraft(ability, store);
+  if (canEditDefinition(ability) && (!ability.key || [...ability.metrics, ...ability.dimensions].some((ref) => !ref.version && !store.items.find((item) => item.id === ref.itemId)?.key))) saveDraft(ability, store);
   syncQueryGroups(store, ability);
   const record = { id: uid("abilityrun"), startedAt: now(), status: "running", signature: abilityQuerySignature(store, ability),
     context: clone(ability.context), scenario: ability.scenario, records: [], modes: [], approvedFor: "", error: "" };
@@ -383,15 +462,31 @@ export async function runAbility(store, ability, changed = () => {}) {
 }
 export function abilityPublishIssues(store, ability) {
   syncQueryGroups(store, ability);
-  const issues = abilityIssues(store, ability), run = abilityCurrentRun(store, ability);
+  const issues = abilityIssues(store, ability);
+  if (ability.singleSqlFlow) return issues;
+  const run = abilityCurrentRun(store, ability);
   if (!ability.key) issues.push("请先保存能力，系统将自动生成 Key。");
-  if (ability.archived) issues.push("已归档能力不能发布新版本。");
   if (ability.scenario !== "normal") issues.push("恢复正常场景并重新整体试跑后发布。");
   if (!run) issues.push("当前能力的全部整体与下钻组合需要完成非空试跑。");
   else if (run.approvedFor !== abilitySignature(store, ability)) issues.push("请核对当前能力的全部取数结果。");
   return issues;
 }
 export function publishAbility(store, ability) {
+  assertMutable(ability);
+  if (ability.singleSqlFlow) {
+    if (!ability.key || ability.metrics.some((reference) => !reference.version && !store.items.find((item) => item.id === reference.itemId)?.key))
+      saveDraft(ability, store);
+    const issues = abilityPublishIssues(store, ability);
+    if (issues.length) throw new Error(issues.join(" "));
+    const definition = abilityDefinition(store, ability);
+    const modes = abilityModes(store, ability);
+    const version = {
+      number: ability.versions.length + 1, abilityId: ability.id, name: ability.name,
+      publishedAt: now(), operator: currentActor, operation: "发布取数能力",
+      definition, modes, runId: ""
+    };
+    ability.versions.push(version); ability.keyLocked = true; return version;
+  }
   const issues = abilityPublishIssues(store, ability);
   if (issues.length) throw new Error(issues.join(" "));
   const run = abilityCurrentRun(store, ability);
@@ -407,7 +502,6 @@ export function useVersion(store, ability, number) {
   const version = ability.versions.find((v) => v.number === number);
   if (!version) throw new Error("能力版本不存在。");
   const m = store.analysis;
-  if (ability.archived && (m.capabilityId !== ability.id || m.version !== number)) throw new Error("已归档能力不能新增分析引用。");
   if (m.capabilityId !== ability.id || m.version !== number) {
     m.showOverall = showsOverall(version.definition);
     m.selections = Object.fromEntries(version.modes.map((mode) => [mode.id, mode.kind === "overall" && !m.showOverall ? [] : mode.fields.filter((f) => f.role === "metric").map((f) => f.key)]));

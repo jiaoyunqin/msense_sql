@@ -389,7 +389,7 @@ kbd {
 .page-header {
   display: flex;
   min-height: 70px;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 24px;
 }
@@ -413,18 +413,19 @@ kbd {
 
 .capability-count {
   display: inline-flex;
-  width: 98px;
-  height: 37px;
+  min-width: 98px;
+  height: 36px;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  margin-top: 16px;
-  padding: 8px 9px;
+  padding: 0 12px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 8px;
   background: var(--surface-muted);
-  color: var(--brand);
-  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
   white-space: nowrap;
 }
 
@@ -1106,10 +1107,6 @@ kbd {
     margin-top: 4px;
   }
 
-  .capability-count {
-    margin-top: 0;
-  }
-
   .catalog-toolbar {
     height: auto;
     grid-template-columns: minmax(0, 1fr);
@@ -1152,12 +1149,6 @@ kbd {
 
   .page-header p {
     max-width: 220px;
-  }
-
-  .capability-count {
-    height: 32px;
-    padding: 5px 8px;
-    font-size: 12px;
   }
 
   .summary-button {

@@ -34,14 +34,65 @@ export const definitions = {
   group_id: { name: "实验组 ID", role: "identity", type: "string", description: "示例中稳定的实验分组标识，供本地分析适配使用。" },
   group_name: { name: "实验分组", role: "identity", type: "string", description: "实验分组展示名称。" },
   is_control: { name: "是否对照组", role: "identity", type: "number", description: "SQL 原生值 1 表示对照组，0 表示实验组。" },
+  experiment_id: { name: "实验 ID", role: "auxiliary", type: "number", description: "当前取数上下文中的实验编号。" },
+  date: { name: "日期", role: "auxiliary", type: "string", description: "观测窗口内的数据日期。" },
   spend_tier: { name: "消费力", role: "dimension", type: "string", description: "按用户历史消费金额分层，统计实体为用户。", entity: "用户", timing: "首次进入实验前的用户快照" },
-  lifecycle: { name: "生命周期", role: "dimension", type: "string", description: "用户生命周期，取自示例用户快照。", entity: "用户", timing: "首次进入实验前的用户快照" },
+  lifecycle: { name: "生命周期", role: "dimension", type: "string", description: "用户生命周期，取自示例用户快照。" , entity: "用户", timing: "首次进入实验前的用户快照" },
   city_id: { name: "城市 ID", role: "dimension", type: "number", description: "数字编码维度；类型为数字，业务角色仍为维度。", entity: "用户", timing: "首次进入实验前的用户快照" },
+  consumption_level: { name: "消费力分层", role: "dimension", type: "string", description: "根据用户历史支付金额划分的高、中、低消费力层级。" },
+  lifecycle_stage: { name: "生命周期", role: "dimension", type: "string", description: "根据用户最近支付状态划分的生命周期阶段。" },
+  user_segment: { name: "八大人群", role: "dimension", type: "string", description: "根据近 30 天用券行为划分的用户人群；当前示例展示三类。" },
   gmv: { name: "支付 GMV", role: "metric", type: "number", format: "currency", unit: "元", description: "观察窗口内已支付订单的实付金额总和，不包含退款调整。" },
   order_count: { name: "支付订单量", role: "metric", type: "number", format: "integer", description: "观察窗口内示例底表的支付订单记录数。" },
+  avg_order_value: { name: "平均订单金额", role: "metric", type: "number", format: "currency", unit: "元", description: "支付 GMV 与支付订单量的比值，用于衡量客单价变化。" },
   redeemed_count: { name: "核销订单量", role: "metric", type: "number", format: "integer", description: "观察窗口内使用优惠券完成支付的订单数。" },
   redemption_rate: { name: "订单核销率", role: "metric", type: "number", format: "percent", precision: 2, description: "核销订单量 / 支付订单量，SQL 输出最终比率；不是用户核销率。" }
 };
+
+// Demo parsing may start from an older aggregate-only SQL. Keep its mocked
+// dimension definitions and values together so split queries use the same data.
+export const singleSqlMockDimensions = [
+  { alias: "consumption_level", ...definitions.consumption_level, mockValue: "中消费力" },
+  { alias: "lifecycle_stage", ...definitions.lifecycle_stage, mockValue: "成熟老客" },
+  { alias: "user_segment", ...definitions.user_segment, mockValue: "普通券用户" }
+].map((field) => ({
+  key: field.alias, format: "decimal", precision: 2, unit: "", nullDisplay: "—",
+  review: false, mockDimension: true, ...field
+}));
+
+export const customAbilityExampleSQL = `SELECT
+  o.group_id AS group_id,
+  o.group_name AS group_name,
+  o.is_control AS is_control,
+  o.order_date AS date,
+  \${libra_id} AS experiment_id,
+  SUM(o.pay_amount) AS gmv,
+  COUNT(DISTINCT o.order_id) AS order_count,
+  SUM(o.pay_amount) / NULLIF(COUNT(DISTINCT o.order_id), 0) AS avg_order_value,
+  CASE
+    WHEN u.historical_spend >= 500 THEN '高消费力'
+    WHEN u.historical_spend >= 200 THEN '中消费力'
+    ELSE '低消费力'
+  END AS consumption_level,
+  u.lifecycle AS lifecycle_stage,
+  CASE
+    WHEN o.coupon_meta_id = 102 THEN '高频券用户'
+    WHEN o.coupon_meta_id = 101 THEN '普通券用户'
+    ELSE '非券用户'
+  END AS user_segment
+FROM demo_orders o
+JOIN demo_users u ON o.user_id = u.user_id
+WHERE o.libra_id = \${libra_id}
+  AND o.order_date BETWEEN \${start_date} AND \${end_date}
+GROUP BY
+  o.group_id,
+  o.group_name,
+  o.is_control,
+  o.order_date,
+  consumption_level,
+  lifecycle_stage,
+  user_segment
+ORDER BY o.is_control DESC, o.order_date;`;
 
 export function sampleSQL(members = []) {
   const dims = members.map((member) => member === "spend_tier"

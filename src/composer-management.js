@@ -1,4 +1,4 @@
-import { hash, uid, itemDefinition, abilityDefinition, sourceType, currentActor, businessGoal, resolveItem, activeGroups, outputDimensions } from "./composer-data.js";
+import { hash, uid, itemDefinition, abilityDefinition, sourceType, canEditDefinition, currentActor, businessGoal, resolveItem, activeGroups, outputDimensions } from "./composer-data.js";
 import { metricFields } from "./composer-metrics.js";
 
 export const sourceLabels = {
@@ -8,7 +8,7 @@ export const sourceLabels = {
 };
 export const stateLabels = {
   all: "全部状态", published: "已发布", changed: "有未发布修改",
-  draft: "仅草稿", archived: "已归档"
+  draft: "仅草稿"
 };
 function content(definition) {
   if (definition.draft) {
@@ -23,7 +23,7 @@ function content(definition) {
         alias: f.alias, key: f.key, name: f.name, role: f.role, type: f.type,
         description: f.description, format: f.format || "decimal", precision: Number(f.precision ?? 2),
         unit: f.unit || "", nullDisplay: f.nullDisplay || "—", controlDash: Boolean(f.controlDash),
-        entity: f.entity || "", timing: f.timing || ""
+        entity: f.entity || "", timing: f.timing || "", splitSql: f.splitSql || ""
       })),
       ...(definition.kind === "metric" ? { metrics: metricFields(definition).map((m) => ({
         alias: m.alias, key: m.key, name: m.name, calculation: m.calculation, valueAlias: m.valueAlias,
@@ -37,6 +37,11 @@ function content(definition) {
   return {
     key: definition.key, name: definition.name, description: definition.description,
     goal: definition.goal, includeOverall: definition.includeOverall, showOverall: definition.showOverall ?? true,
+    singleSqlFlow: Boolean(definition.singleSqlFlow), sqlItemId: definition.sqlItemId || "",
+    crossDimensions: (definition.crossDimensions || []).map((cross) => ({
+      id: cross.id, name: cross.name, leftDimensionKey: cross.leftDimensionKey,
+      rightDimensionKey: cross.rightDimensionKey, splitSql: cross.splitSql, status: cross.status
+    })),
     metrics: definition.metrics.map((r) => ({ itemId: r.itemId, version: r.version, metricKeys: r.metricKeys, definition: content(r.definition) })),
     dimensions: definition.dimensions.map((r) => ({ itemId: r.itemId, version: r.version, definition: content(r.definition) })),
     groups: definition.groups.map((g) => ({
@@ -50,20 +55,18 @@ export function definitionHash(store, obj) {
   catch { return hash({ name: obj.name, key: obj.key, description: obj.description, metrics: obj.metrics, dimensions: obj.dimensions, groups: obj.groups }); }
 }
 export function publicationState(store, obj) {
-  if (obj.archived) return "archived";
   const latest = obj.versions.at(-1);
   if (!latest) return "draft";
   return definitionHash(store, obj) === hash(content(latest.definition)) ? "published" : "changed";
 }
 export function matchesState(store, obj, filter) {
   const state = publicationState(store, obj);
-  if (filter === "all") return state !== "archived";
-  if (filter === "published") return !obj.archived && obj.versions.length > 0;
+  if (filter === "all") return true;
+  if (filter === "published") return obj.versions.length > 0;
   return state === filter;
 }
 export function catalogPublicationState(store, obj) {
   if (!obj.title) return publicationState(store, obj);
-  if (obj.archived) return "archived";
   return obj.versions?.length ? "published" : "unknown";
 }
 export function catalogSearchText(store, obj) {
@@ -94,8 +97,8 @@ export function matchesCatalog(store, obj, { search = "", source = "all", goal =
   if (source !== "all" && sourceType(obj) !== source) return false;
   if (goal !== "all" && obj.goal !== goal) return false;
   const publication = catalogPublicationState(store, obj);
-  if (state === "all" ? publication === "archived"
-    : state === "published" ? publication === "archived" || !obj.versions?.length
+  if (state === "all" ? false
+    : state === "published" ? !obj.versions?.length
     : publication !== state) return false;
   return catalogSearchText(store, obj).includes(search.trim().toLocaleLowerCase("zh-CN"));
 }
@@ -107,8 +110,7 @@ export function trackChanges(store) {
   }
 }
 export function assertMutable(obj) {
-  if (sourceType(obj) !== "custom_sql") throw new Error("内置定义只读，请先复制为自定义 SQL。");
-  if (obj.archived) throw new Error("该对象已归档，请先恢复后编辑。");
+  if (!canEditDefinition(obj)) throw new Error("仅创建人可以编辑 SQL 定义。");
 }
 export function saveDraft(obj, store) {
   if (obj.draft || obj.metrics) assertMutable(obj);
@@ -122,7 +124,7 @@ export function saveDraft(obj, store) {
   }
   if (obj.metrics) {
     delete obj.owner;
-    obj.goal = businessGoal;
+    if (!obj.singleSqlFlow) obj.goal = businessGoal;
     // Saving an ability also saves its new inline SQL definitions.
     for (const ref of [...obj.metrics, ...obj.dimensions]) {
       const item = store?.items.find((candidate) => candidate.id === ref.itemId);
@@ -146,11 +148,4 @@ export function keyImpact(store, obj) {
   } else if (store.analysis.capabilityId === obj.id) result.push(`${store.analysis.name} · 固定 v${store.analysis.version}`);
   if (obj.versions.length) result.push(`本对象 ${obj.versions.length} 个已发布版本保持原定义`);
   return result;
-}
-export function setArchived(obj, archived) {
-  if (sourceType(obj) !== "custom_sql") throw new Error("内置定义不能归档。");
-  obj.archived = archived;
-  obj.updatedAt = new Date().toISOString();
-  obj.audit ||= [];
-  obj.audit.unshift({ operation: archived ? "归档" : "恢复", operator: currentActor, at: obj.updatedAt });
 }
