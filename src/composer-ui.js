@@ -1,8 +1,8 @@
 import { createIcons, icons } from "lucide";
 import {
   clone, uid, COMPOSER_KEY, loadComposer, newItem, newAbility, makeReference, resolveItem,
-  referenceLabel, entities, itemIssues, abilityIssues, itemCurrentRun, itemReviewSignature,
-  abilityCurrentRun, abilitySignature, abilityQuerySignature, defaultContext,
+  referenceLabel, entities, itemCurrentRun, itemReviewSignature,
+  abilityCurrentRun, abilitySignature, defaultContext,
   outputDimensions, directQuery, syncQueryGroups, completeGroup, sourceType, currentActor, businessGoal,
   activeGroups, showsOverall, builtinDimensionOwners, dimensionCategory, dimensionCategoryLabels, knownDimensionValues, metricSQL
 } from "./composer-data.js";
@@ -127,9 +127,6 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   function configToolbar() {
     return `<div class="c-config-toolbar"><span>复用取数配置</span><div class="p-actions">${btn("config-load", "载入已有取数配置", "folder-open", "", busyAttr(busy))}${btn("config-save", "保存取数配置", "bookmark-plus")}</div></div>`;
   }
-  function workflowSteps(current) {
-    return `<nav class="c-workflow" aria-label="DS 配置流程">${[["ability", "1", "配置能力"], ["sql", "2", "编写与解析 SQL"], ["trial", "3", "试跑与发布"], ["analysis", "4", "分析应用"]].map(([key, step, label]) => `<span class="${current === key ? "current" : ""}"><b>${step}</b>${label}</span>`).join("")}${btn("workflow-guide", "完整说明", "", "link")}</nav>`;
-  }
   function renderGuide() {
     outlet.innerHTML = header("使用说明", "", btn("new-ability", "新建取数能力", "plus", "primary"))
       + section("配置与发布", "",
@@ -138,14 +135,6 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     refreshIcons();
   }
   function itemContext() { return item.context || defaultContext; }
-  function statusBar() {
-    if (item) {
-      const d = item.draft;
-      return `<div class="p-statusbar" id="composer-status">${badge(d.parsedSql === d.sql && !d.parseError ? "语法校验通过" : "SQL 待校验", d.parsedSql === d.sql && !d.parseError ? "green" : "")}${badge(item.versions.length ? `已发布 v${item.versions.at(-1).number}` : "尚未发布", "blue")}<span class="p-status-note">确认字段后保存；取数与结果校验在试跑浮层完成</span></div>`;
-    }
-    const run = abilityCurrentRun(store, ability);
-    return `<div class="p-statusbar" id="composer-status">${badge(abilityIssues(store, ability).length ? "组合待校验" : "组合校验通过", abilityIssues(store, ability).length ? "" : "green")}${badge(run ? "全部取数有效" : "全部取数待验证", run ? "green" : "")}${badge(run?.approvedFor === abilitySignature(store, ability) ? "结果已核对" : "结果待核对", run?.approvedFor === abilitySignature(store, ability) ? "green" : "")}${badge(ability.versions.length ? `已发布 v${ability.versions.at(-1).number}` : "尚未发布", "blue")}<span class="p-status-note">分析模块引用发布后的能力版本</span></div>`;
-  }
   function versionsHTML(obj, type) {
     return obj.versions.length ? obj.versions.slice().reverse().map((v) =>
       `<div class="p-version"><div><strong>v${v.number} · ${esc(v.definition.name)}</strong>${badge(v.fixture ? "预设版本" : "已发布", "green")}<span>${date(v.publishedAt)}</span><small>${esc(v.operation || (v.fixture ? "预设版本" : "发布"))} · ${esc(v.operator || "历史操作人未记录")} · ${type === "ability" ? `${v.modes.length} 份结果` : "SQL 定义"}</small></div><div class="p-actions">${btn("view-version", "查看快照", "file-code", "", `data-type="${type}" data-number="${v.number}"`)}${btn(type === "ability" ? "use-version" : "attach", type === "ability" ? "用于分析" : "关联取数能力组", "arrow-up-right", "", `data-number="${v.number}" ${obj.archived ? "disabled" : ""}`)}</div></div>`
@@ -291,8 +280,8 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   function renderAbility() {
     syncQueryGroups(store, ability);
     outlet.innerHTML = header(ability.name, "配置指标、下钻维度与独立分组，整体试跑后发布给分析模块。",
-      btn("save", "保存草稿", "save") + btn("validate", "校验配置", "list-checks") + btn("ability-context", "整体试跑", "play", "primary", busyAttr(busy)) + btn("publish-ability", "发布能力", "upload", "", busyAttr(busy)))
-      + configToolbar() + workflowSteps("ability") + statusBar() + issuesHTML(issues)
+      btn("save", "保存草稿", "save") + btn("ability-context", "整体试跑", "play", "primary", busyAttr(busy)) + btn("publish-ability", "发布能力", "upload", "", busyAttr(busy)))
+      + configToolbar() + issuesHTML(issues)
       + section("基础信息", "", `<div class="p-form-grid two">${input("能力名称", "ability.name", ability.name)}${readonlyField("业务目标", businessGoal)}</div>${keyField(ability)}${area("能力说明", "ability.description", ability.description)}`)
       + section("指标", "", sourceCards("metric"),
         btn("pick-metric", "从已有指标库选择", "library") + btn("new-owned-metric", "新建 SQL", "plus", "primary"))
@@ -306,7 +295,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   function freezeForms() {
     outlet.querySelectorAll("[data-model]").forEach((el) => { el.disabled = true; });
     outlet.querySelectorAll("[data-action]").forEach((el) => {
-      if (["save", "validate", "publish-ability", "publish-item", "back-owner", "attach", "use-ability", "use-version", "sql-template"].includes(el.dataset.action) || /^(new-owned-|pick-|remove-|add-|edit-field|edit-metric|metric-|template-|dimension-|insert-parameter|parse|accept-diff)/.test(el.dataset.action)) el.disabled = true;
+      if (["save", "publish-ability", "publish-item", "back-owner", "attach", "use-ability", "use-version", "sql-template"].includes(el.dataset.action) || /^(new-owned-|pick-|remove-|add-|edit-field|edit-metric|metric-|template-|dimension-|insert-parameter|parse|accept-diff)/.test(el.dataset.action)) el.disabled = true;
     });
   }
   function resultDetails(record) {
@@ -400,7 +389,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     outlet.innerHTML = header(item.name, "编写 SQL，校验语法并确认输出字段与参数。",
       (readonly ? "" : btn("save", "保存 SQL", "save")) + (owner ? "" : btn("item-context", "进入取数验证", "play", "", busyAttr(busy))) + (readonly ? (sourceType(item) === "builtin_sql" ? btn("copy-source", "复制为自定义 SQL", "copy", "primary", `data-id="${item.id}" data-version="${item.versions.at(-1).number}"`) : "") : owner ? btn("back-owner", "保存并返回能力组", "arrow-right", "primary") : btn("attach", "关联取数能力组", "layers", "primary", `data-number="${item.versions.at(-1)?.number || 0}"`)),
       owner ? owner.name : "SQL 取数项", owner ? `#/ability/${owner.id}` : "#/items")
-      + configToolbar() + workflowSteps("sql") + statusBar() + issuesHTML(issues)
+      + configToolbar() + issuesHTML(issues)
       + (item.kind === "dimension" ? section("取数项信息", "", input("取数项名称", "item.name", item.name) + keyField(item) + area("说明", "item.description", item.description)) : "")
       + section("SQL 配置", item.kind === "dimension" ? "每个实体需输出唯一一行 ID 和维度值。" : "", editorHTML() + parameterBindingsHTML())
       + (item.kind === "metric" ? section("指标组", "", input("指标组名称", "item.name", item.name) + `<div id="metric-table">${metricTableHTML()}</div><details class="c-metric-info"><summary>说明与标识</summary>${keyField(item)}${area("说明 / 指标口径", "item.description", item.description)}</details>`, "", "metric-group") : "")
@@ -573,7 +562,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     const m = store.analysis, versions = store.abilities.flatMap((a) => a.versions.filter((v) => !a.archived || (m.capabilityId === a.id && m.version === v.number)).map((v) => [`${a.id}:${v.number}`, `${v.name} · v${v.number}${a.archived ? " · 已归档引用" : ""}`]));
     const v = store.abilities.find((a) => a.id === m.capabilityId)?.versions.find((v) => v.number === m.version);
     outlet.innerHTML = header(m.name, "引用确定的取数能力版本，选择输入并配置分析思路。", btn("save", "保存草稿", "save") + btn("analysis-context", "试跑上下文", "settings-2") + btn("analyze", "分析试跑", "flask-conical", "primary", busyAttr(busy)))
-      + workflowSteps("analysis") + issuesHTML(issues)
+      + issuesHTML(issues)
       + section("分析模块信息", "", `<div class="p-form-grid two">${input("模块名称", "analysis.name", m.name)}${readonlyField("业务目标", businessGoal)}</div>${area("说明", "analysis.description", m.description)}`)
       + section("取数能力", "显式引用固定版本；源 SQL 或能力草稿修改不影响当前分析。",
         select("能力版本", "analysis-reference", [["", "请选择已发布能力"], ...versions], `${m.capabilityId}:${m.version}`)
@@ -622,8 +611,6 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       experiment.hidden = !context.libra_id; experiment.innerHTML = experimentHTML(context);
       refreshIcons(); return;
     }
-    const current = outlet.querySelector("#composer-status");
-    if (current && (item || ability)) current.replaceWith(document.createRange().createContextualFragment(statusBar()));
     const result = outlet.querySelector(item ? "#item-results" : "#ability-results");
     if (result && (item || ability)) result.replaceWith(document.createRange().createContextualFragment(item ? itemResults() : abilityResults()));
     refreshIcons();
@@ -942,7 +929,6 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         const url = URL.createObjectURL(new Blob([JSON.stringify(store, null, 2)], { type: "application/json" }));
         const link = document.createElement("a"); link.href = url; link.download = "msense-composer-workspace.json"; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); return;
       }
-      if (a === "validate") { issues = item ? itemIssues(item) : abilityIssues(store, ability); render(); if (!issues.length) showToast("当前配置校验通过"); return; }
       if (a === "pick-metric" || a === "pick-dimension") { openPicker(a.endsWith("dimension") ? "dimension" : "metric"); return; }
       if (a === "confirm-picker") {
         const ids = [...overlay.querySelectorAll('input[name="source-choice"]:checked')].map((el) => el.value);

@@ -145,12 +145,6 @@
 .c-catalog-tools summary { cursor: pointer; }
 .c-catalog-tools p { margin: 12px 0; line-height: 22px; }
 .c-catalog-tools .p-button { margin-right: 8px; }
-.c-workflow { display: flex; align-items: center; flex-wrap: wrap; gap: 14px 20px; padding: 12px 16px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 18px; font-size: 12px; color: var(--text-secondary); }
-.c-workflow > span { display: flex; align-items: center; gap: 7px; }
-.c-workflow b { display: grid; place-items: center; width: 22px; height: 22px; border: 1px solid var(--border); border-radius: 50%; font-weight: 500; }
-.c-workflow .current { color: var(--brand); font-weight: 500; }
-.c-workflow .current b { border-color: var(--brand); }
-.c-workflow > button { margin-left: auto; font-size: 11px; }
 .c-guide-example p, .c-guide-copy { color: var(--text-secondary); font-size: 13px; line-height: 24px; margin: 8px 0 14px; }
 .c-guide-steps { padding-left: 22px; }
 .c-guide-steps li { padding: 8px 0 16px; font-size: 14px; line-height: 24px; }
@@ -361,7 +355,6 @@
   .c-trial-next, .c-validation-entry { flex-wrap: wrap; }
   .c-managed-capability .capability-summary { align-items: flex-start; flex-wrap: wrap; }
   .c-managed-body { padding: 0 14px 14px; }
-  .c-workflow { gap: 10px 16px; padding: 12px; }
   .c-dimension-toolbar > .p-actions { width: 100%; margin-left: 0; flex-wrap: wrap; }
   .c-dimension-picker-body { grid-template-columns: 94px minmax(0, 1fr); }
   .c-dimension-picker > header, .c-dimension-picker > footer { padding-inline: 12px; }
