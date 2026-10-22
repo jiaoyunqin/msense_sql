@@ -280,14 +280,14 @@ function cardTemplate(capability, expanded) {
           <div class="c-catalog-meta" aria-label="来源、版本和更新时间"></div>
         </div>
         <span class="summary-actions">
-          <button class="outline-button expand-button" type="button" aria-expanded="${expanded}" aria-controls="details-${capability.id}">
-            <i data-lucide="${expanded ? "chevron-up" : "eye"}"></i>
-            <span>${expanded ? "收起" : "查看"}</span>
-          </button>
-          <span class="c-action-hint" tabindex="0" title="请先在查看中选择至少一个指标" aria-label="请先在查看中选择至少一个指标"><button class="outline-button run-button" type="button" disabled>
+          <span class="c-action-hint" tabindex="0" title="请先展开并选择至少一个指标" aria-label="请先展开并选择至少一个指标"><button class="outline-button run-button" type="button" disabled>
             <i data-lucide="flask-conical"></i>
             试跑
           </button></span>
+          <button class="outline-button expand-button" type="button" aria-expanded="${expanded}" aria-controls="details-${capability.id}">
+            <i data-lucide="${expanded ? "chevron-up" : "chevron-down"}"></i>
+            <span>${expanded ? "收起" : "展开"}</span>
+          </button>
         </span>
       </header>
 
@@ -381,8 +381,8 @@ function setExpanded(panel, expanded) {
   content.hidden = !expanded;
   summaryButton.setAttribute("aria-expanded", String(expanded));
   expandButton.setAttribute("aria-expanded", String(expanded));
-  expandButton.querySelector("span").textContent = expanded ? "收起" : "查看";
-  icon?.replaceWith(iconPlaceholder(expanded ? "chevron-up" : "eye"));
+  expandButton.querySelector("span").textContent = expanded ? "收起" : "展开";
+  icon?.replaceWith(iconPlaceholder(expanded ? "chevron-up" : "chevron-down"));
   refreshIcons();
 }
 
@@ -407,7 +407,7 @@ function updatePanelSelection(panel) {
   panel.querySelector(".selected-summary").textContent = `提供 ${totalMetrics} 个指标`;
   const runButton = panel.querySelector(".run-button"), hint = runButton.parentElement;
   runButton.disabled = !checkedMetrics.length;
-  hint.title = checkedMetrics.length ? `试跑已选的 ${checkedMetrics.length} 个指标` : "请先在查看中选择至少一个指标";
+  hint.title = checkedMetrics.length ? `试跑已选的 ${checkedMetrics.length} 个指标` : "请先展开并选择至少一个指标";
   hint.setAttribute("aria-label", hint.title);
   if (checkedMetrics.length) hint.removeAttribute("tabindex");
   else hint.setAttribute("tabindex", "0");

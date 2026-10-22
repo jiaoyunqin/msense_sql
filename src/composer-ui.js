@@ -4,7 +4,8 @@ import {
   referenceLabel, entities, itemCurrentRun, itemReviewSignature,
   abilityCurrentRun, abilitySignature, defaultContext,
   outputDimensions, directQuery, syncQueryGroups, completeGroup, sourceType, canEditDefinition, canViewHistory, currentActor, businessGoal, businessGoals, businessGoalOptions,
-  activeGroups, showsOverall, builtinDimensionOwners, dimensionCategory, dimensionCategoryLabels, knownDimensionValues, metricSQL
+  activeGroups, showsOverall, builtinDimensionOwners, dimensionCategory, dimensionCategoryLabels, knownDimensionValues, metricSQL,
+  crossDimensionKeys, MAX_CROSS_DIMENSIONS
 } from "./composer-data.js";
 import { calculationTypes, aggregations, metricRows, metricFields, metricIssues, newMetric, syncMetrics, entityAlias, userMetricSQL } from "./composer-metrics.js";
 import { parameterCatalog, scenarios, formatValue, customAbilityExampleSQL, singleSqlMockDimensions } from "./prototype-data.js";
@@ -14,10 +15,10 @@ import {
 } from "./composer-management.js";
 import {
   parseItem, syncDimension, runItem, publishItem, itemPublishIssues, attachItem, runAbility,
-  publishAbility, abilityPublishIssues, useVersion, runAnalysis, abilityModes, compileMode, singleSqlSplitSQL
+  publishAbility, abilityPublishIssues, useVersion, runAnalysis, abilityModes, abilityTrialModes, compileMode, singleSqlSplitSQL
 } from "./composer-engine.js";
 import { abilityProgress, itemProgress } from "./composer-progress.js";
-import { abilityCatalogActions } from "./composer-catalog.js";
+import { abilityCatalogActions, abilityCatalogContent } from "./composer-catalog.js";
 import { createPublicationHistory } from "./composer-history.js";
 import { createTrialHistory } from "./composer-trial-history.js";
 import { findTrialRun as ownedTrialRun, trialRuns, trialExperiment, trialRecordStatus, trialRecordTime } from "./composer-trial-records.js";
@@ -69,15 +70,17 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   let ability, item, issues = [], busy = false, fieldDraft, pickerKind = "", dialogKind = "", previousFocus, selectedRecord = "", selectedRun = "", highlight = -1, analysisTab = "output", trialKind = "", attachDraft;
   let parameterOpen = false, parameterSearch = "";
   let catalogSource = "all", catalogGoal = "all", catalogState = "all";
+  const catalogDrafts = store.catalogDrafts ||= {};
   let presetId = "", presetResult = "";
   let abilityLoadTarget, abilitySourceSearch = "", abilitySourceId = "", abilityLoadError = "", abilityLoadBusy = false;
   let dimensionPicker, valueDraft;
-  let singleSqlFullscreen = false, singleDimensionCandidate = "", singleCrossDraft, singleSplitSqlDraft;
+  let singleSqlFullscreen = false, singleDimensionCandidate = "", singleSplitSqlDraft;
   let singleContextSearch = "", singleContextOwner = "";
   const abilityTouched = new Set();
   let publishFailure = false;
   const progressHTML = new WeakMap();
   const parseTimers = new Map(), parsing = new Map();
+  const generatingCrosses = new Set();
   let parseSequence = 0;
   const persist = () => {
     trackChanges(store);
@@ -138,6 +141,63 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       + (state === "changed" ? badge(`v${v.number + 1} 草稿待发布`, "amber") : "")
       + (updated ? `<span class="c-catalog-updated" title="更新时间：${esc(updatedText)}">更新：${esc(updatedText)}</span>` : "");
   }
+  function catalogDraft(obj, content = abilityCatalogContent(store, obj)) {
+    const draft = catalogDrafts[obj.id] ||= {
+      expanded: false, search: "",
+      metrics: content.metrics.filter((field) => field.available).map((field) => field.id),
+      dimensions: content.dimensions.filter((dimension) => dimension.modeIds.length).map((dimension) => dimension.id)
+    };
+    draft.metrics = draft.metrics.filter((id) => content.metrics.some((field) => field.id === id && field.available));
+    draft.dimensions = draft.dimensions.filter((id) => content.dimensions.some((dimension) => dimension.id === id && dimension.modeIds.length));
+    return draft;
+  }
+  function catalogTrialSelection(obj, content = abilityCatalogContent(store, obj)) {
+    const draft = catalogDraft(obj, content);
+    return { metrics: [...draft.metrics], modes: [...new Set([
+      ...content.modes.filter((mode) => mode.kind === "overall").map((mode) => mode.id),
+      ...content.dimensions.filter((dimension) => draft.dimensions.includes(dimension.id)).flatMap((dimension) => dimension.modeIds)
+    ])] };
+  }
+  function catalogTrialHint(obj, actions, content) {
+    if (!actions.trial) return abilityProgress(store, obj).nextIssue || "请先完成取数配置后再试跑。";
+    if (actions.trial.history) return "";
+    try { abilityTrialModes(store, obj, catalogTrialSelection(obj, content)); return ""; }
+    catch (error) { return error.message; }
+  }
+  function catalogDetailsHTML(obj, content) {
+    const draft = catalogDraft(obj, content);
+    const option = (field, kind) => {
+      const available = kind === "metric" ? field.available : Boolean(field.modeIds.length);
+      const selected = (kind === "metric" ? draft.metrics : draft.dimensions).includes(field.id);
+      const description = field.description || "";
+      return `<label class="selection-option ${kind === "dimension" ? "compact-option" : ""}" ${!available ? 'title="当前配置尚不可执行"' : ""}>
+        <input type="checkbox" data-model="catalog-${kind}" value="${esc(field.id)}" ${selected ? "checked" : ""} ${available ? "" : "disabled"}>
+        <span class="checkbox-ui" aria-hidden="true"></span><span class="option-copy"><strong>${esc(field.name)}</strong>${description ? `<small>${esc(description)}</small>` : ""}${kind === "metric" ? `<small>Key：${esc(field.key)}</small>` : ""}</span></label>`;
+    };
+    return `<div class="capability-content" id="details-managed-${esc(obj.id)}" ${draft.expanded ? "" : "hidden"}>
+      <div class="capability-details">${obj.description ? `<p>${esc(obj.description)}</p>` : ""}<dl class="selection-overview"><div><dt>指标</dt><dd class="overview-value"></dd></div></dl></div>
+      <div class="selection-columns"><section class="selection-group metric-group"><header class="selection-group-header"><div><h3>指标</h3><span class="group-count"></span></div>${content.metrics.some((field) => field.available) ? `<button type="button" class="select-all-button" data-action="catalog-select-all" data-id="${esc(obj.id)}">全选</button>` : ""}</header>
+        <label class="search-field metric-search">${icon("search")}<input type="search" data-model="catalog-metric-search" aria-label="搜索${esc(obj.name)}的指标" placeholder="搜索指标名称、Key 或口径" value="${esc(draft.search)}"></label>
+        <div class="selection-grid">${content.metrics.map((field) => option(field, "metric")).join("") || '<p class="selection-empty">暂无指标</p>'}<p class="selection-empty c-metric-empty" hidden>没有匹配的指标</p></div></section>
+      <section class="selection-group dimension-group"><header class="selection-group-header"><div><h3>下钻维度</h3><span class="dimension-count"></span></div></header>
+        <div class="selection-grid dimension-grid">${content.dimensions.map((dimension) => option(dimension, "dimension")).join("") || '<p class="selection-empty">暂无下钻维度</p>'}</div></section></div></div>`;
+  }
+  function refreshCatalogPanel(panel, obj, content = abilityCatalogContent(store, obj)) {
+    const draft = catalogDraft(obj, content), actions = abilityCatalogActions(store, obj);
+    panel.querySelector(".group-count").textContent = `已选 ${draft.metrics.length}/${content.metrics.length}`;
+    panel.querySelector(".dimension-count").textContent = `已选 ${draft.dimensions.length}/${content.dimensions.length}`;
+    panel.querySelector(".overview-value").textContent = content.metrics.filter((field) => draft.metrics.includes(field.id)).map((field) => field.name).join("、") || "暂未选择指标";
+    const selectAll = panel.querySelector(".select-all-button");
+    if (selectAll) selectAll.textContent = content.metrics.filter((field) => field.available).every((field) => draft.metrics.includes(field.id)) ? "取消全选" : "全选";
+    const trial = panel.querySelector('[data-action="run-catalog"]'), hint = catalogTrialHint(obj, actions, content);
+    trial.disabled = Boolean(hint); trial.parentElement.title = hint || (actions.trial.history ? "查看已有验证记录" : `试跑已选的 ${draft.metrics.length} 个指标`);
+    trial.parentElement.setAttribute("aria-label", trial.parentElement.title);
+    if (hint) trial.parentElement.setAttribute("tabindex", "0"); else trial.parentElement.removeAttribute("tabindex");
+    const query = draft.search.trim().toLocaleLowerCase("zh-CN");
+    const options = [...panel.querySelectorAll(".metric-group .selection-option")];
+    options.forEach((option) => { option.hidden = !option.textContent.toLocaleLowerCase("zh-CN").includes(query); });
+    panel.querySelector(".c-metric-empty").hidden = !options.length || options.some((option) => !option.hidden);
+  }
   function renderCatalog() {
     const filters = { search: document.querySelector("#catalog-search").value, source: catalogSource, goal: catalogGoal, state: catalogState };
     const list = catalog.querySelector("#capability-list");
@@ -150,19 +210,18 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     const rows = store.abilities.filter((a) => matchesCatalog(store, a, filters))
     .sort((a, b) => Number(Boolean(b.demo)) - Number(Boolean(a.demo))).map((a) => {
       const actions = abilityCatalogActions(store, a);
-      const metricCount = a.metrics.reduce((count, ref) => count + ref.metricKeys.length, 0);
+      const content = abilityCatalogContent(store, a), draft = catalogDraft(a, content);
+      const metricCount = content.metrics.length;
       const action = (name, label, symbol, hint = "", extra = "") => `<button type="button" class="outline-button" data-action="${name}" data-id="${esc(a.id)}" ${hint ? `title="${esc(hint)}"` : ""} ${extra}>${icon(symbol)}${label}</button>`;
       const trial = actions.trial ? action("run-catalog", actions.trial.label, actions.trial.history ? "history" : "flask-conical",
         actions.trial.history ? "查看已有验证记录，获取数据仍需通过配置检查" : "试跑当前配置",
-        `data-run-id="${esc(actions.trial.runId)}"`) : "";
-      const primary = actions.view
-        ? action("view-ability", "查看", "eye")
-        : action("edit-ability", "编辑", "square-pen");
-      const edit = actions.view && actions.edit ? action("edit-ability", "编辑", "square-pen") : "";
-      const entry = actions.view ? "view-ability" : "edit-ability";
-      return `<article class="capability-panel c-managed-capability" data-managed-id="${esc(a.id)}"><header class="capability-summary"><div class="c-catalog-heading"><button type="button" class="summary-button" data-action="${entry}" data-id="${esc(a.id)}" aria-label="${esc(a.name)} · ${actions.label}" title="${esc(a.name)}"><span class="capability-type">取数能力</span><strong>${esc(a.name)}</strong><span class="selected-summary">已配置 ${metricCount} 个指标</span></button><div class="c-catalog-meta" aria-label="来源、版本和更新时间">${catalogMetadata(a)}</div></div><div class="summary-actions">${primary}${trial}${edit}${moreActions(a, "ability")}</div></header></article>`;
+        `data-run-id="${esc(actions.trial.runId)}"`) : action("run-catalog", "试跑", "flask-conical", "", "disabled");
+      const primary = `<button type="button" class="outline-button expand-button" data-action="catalog-expand" data-id="${esc(a.id)}" aria-expanded="${draft.expanded}" aria-controls="details-managed-${esc(a.id)}">${icon(draft.expanded ? "chevron-up" : "chevron-down")}<span>${draft.expanded ? "收起" : "展开"}</span></button>`;
+      const edit = actions.edit ? action("edit-ability", "编辑", "square-pen") : "";
+      return `<article class="capability-panel c-managed-capability ${draft.expanded ? "expanded" : ""}" data-managed-id="${esc(a.id)}"><header class="capability-summary"><div class="c-catalog-heading"><button type="button" class="summary-button" data-action="catalog-expand" data-id="${esc(a.id)}" aria-expanded="${draft.expanded}" aria-controls="details-managed-${esc(a.id)}" title="${esc(a.name)}"><span class="capability-type">取数能力</span><strong>${esc(a.name)}</strong><span class="selected-summary">已配置 ${metricCount} 个指标</span></button><div class="c-catalog-meta" aria-label="来源、版本和更新时间">${catalogMetadata(a)}</div></div><div class="summary-actions"><span class="c-action-hint">${trial}</span>${primary}${edit}${moreActions(a, "ability")}</div></header>${catalogDetailsHTML(a, content)}</article>`;
     }).join("");
     list.insertAdjacentHTML("afterbegin", rows);
+    list.querySelectorAll("[data-managed-id]").forEach((panel) => refreshCatalogPanel(panel, store.abilities.find((obj) => obj.id === panel.dataset.managedId)));
     catalog.querySelector("#empty-results").hidden = Boolean([...list.children].some((el) => !el.hidden));
     document.querySelector(".capability-count").innerHTML = `${icon("database")}${[...list.children].filter((el) => !el.hidden).length} 项能力`; refreshIcons();
   }
@@ -243,7 +302,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   function renderGuide() {
     outlet.innerHTML = header("使用说明", "", btn("new-ability", "新建取数能力", "plus", "primary"))
       + section("配置与发布", "",
-        `<ol class="c-guide-steps"><li><strong>填写基础信息</strong><p>填写名称、说明和业务目标；能力 ID 在首次保存时由系统生成。</p></li><li><strong>引用实验上下文</strong><p>复制或插入实验 ID、实验平台 ID和观测起止时间参数。</p></li><li><strong>编写并解析完整 SQL</strong><p>提交一整套完整 SQL，校验后由 AI mock 同时生成指标、维度和拆分 SQL。</p></li><li><strong>人工确认</strong><p>修改指标名、字段、描述以及维度名称、Key、描述和拆分 SQL。</p></li><li><strong>配置交叉维度</strong><p>只为主动选择的两个普通维度生成组合 SQL，不自动穷举。</p></li><li><strong>保存或发布</strong><p>未完成内容可保存草稿；解析完成且至少有一个指标时可校验并发布。</p></li><li><strong>用于分析</strong><p>在分析模块选择已发布固定版本；后续草稿不会自动升级既有引用。</p></li></ol>`);
+`<ol class="c-guide-steps"><li><strong>填写基础信息</strong><p>填写名称、说明和业务目标；能力 ID 在首次保存时由系统生成。</p></li><li><strong>引用实验上下文</strong><p>复制或插入实验 ID、实验平台 ID和观测起止时间参数。</p></li><li><strong>编写并解析完整 SQL</strong><p>提交一整套完整 SQL，校验后由 AI mock 同时生成指标、维度和拆分 SQL。</p></li><li><strong>人工确认</strong><p>修改指标名、字段、描述以及维度名称、Key、描述和拆分 SQL。</p></li><li><strong>配置交叉维度</strong><p>每组主动选择 2–3 个普通维度，可新增多组并分别生成组合 SQL。</p></li><li><strong>保存或发布</strong><p>未完成内容可保存草稿；解析完成且至少有一个指标时可校验并发布。</p></li><li><strong>用于分析</strong><p>在分析模块选择已发布固定版本；后续草稿不会自动升级既有引用。</p></li></ol>`);
     refreshIcons();
   }
   function itemContext() { return item.context || defaultContext; }
@@ -326,15 +385,15 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     const options = dimensionOptions().filter((d) => d.category === p.tab && [d.name, d.key, d.detail].join(" ").toLowerCase().includes(p.search.toLowerCase()));
     return options.map((d) => {
       const included = existing.has(d.id) || (d.queryItemId && activeGroups(ability).some((g) => g.queryItemId === d.queryItemId));
-      const max = p.target !== "single" && p.selected.length + (target?.members.length || 0) >= 4 && !p.selected.includes(d.id);
-      const reason = included ? "已添加" : d.reason || (max ? "最多交叉 4 个维度" : "");
+      const max = p.target !== "single" && p.selected.length + (target?.members.length || 0) >= MAX_CROSS_DIMENSIONS && !p.selected.includes(d.id);
+      const reason = included ? "已添加" : d.reason || (max ? "最多交叉 3 个维度" : "");
       return `<label class="c-dimension-option ${reason ? "unavailable" : ""}" title="${esc(reason || d.detail)}"><input type="checkbox" data-model="dimension-choice" value="${esc(d.id)}" ${included || p.selected.includes(d.id) ? "checked" : ""} ${reason ? "disabled" : ""}><span><strong>${esc(d.name)}</strong><small>${esc(d.key)}</small><small>${esc(reason || d.detail)}</small></span></label>`;
     }).join("") || `<div class="c-dimension-no-results">${p.search ? "没有匹配的维度" : p.tab === "builtin" ? "选择内置指标组后，可使用其自带维度" : p.tab === "custom" ? "暂无自定义维度，可新建 SQL" : "暂无可用公共维度"}</div>`;
   }
   function dimensionPickerHTML() {
     if (!dimensionPicker) return "";
     const p = dimensionPicker, cross = p.target !== "single";
-    return `<div class="c-dimension-picker" role="dialog" aria-label="选择维度"><header><strong>${cross ? "选择交叉成员" : "选择下钻维度"}</strong>${btn("dimension-picker-close", "", "x", "link", 'aria-label="关闭维度选择"')}</header><label class="search-field">${icon("search")}<input type="search" data-model="dimension-search" aria-label="搜索维度" placeholder="搜索维度名称或 Key" value="${esc(p.search)}"></label><div class="c-dimension-picker-body"><nav aria-label="维度来源">${Object.entries(dimensionCategoryLabels).map(([key, name]) => `<button type="button" data-action="dimension-tab" data-id="${key}" aria-pressed="${key === p.tab}" class="${key === p.tab ? "active" : ""}">${name}</button>`).join("")}</nav><div id="dimension-picker-options">${dimensionPickerRows()}</div></div><footer><span id="dimension-picker-count">${cross ? "最多交叉 4 个维度" : "多选时分别取数"}</span><div class="p-actions">${p.tab === "custom" ? btn("new-owned-dimension", "新建 SQL 维度", "code-2", "link") : ""}${btn("dimension-picker-confirm", "添加所选", "check", "primary")}</div></footer></div>`;
+    return `<div class="c-dimension-picker" role="dialog" aria-label="选择维度"><header><strong>${cross ? "选择交叉成员" : "选择下钻维度"}</strong>${btn("dimension-picker-close", "", "x", "link", 'aria-label="关闭维度选择"')}</header><label class="search-field">${icon("search")}<input type="search" data-model="dimension-search" aria-label="搜索维度" placeholder="搜索维度名称或 Key" value="${esc(p.search)}"></label><div class="c-dimension-picker-body"><nav aria-label="维度来源">${Object.entries(dimensionCategoryLabels).map(([key, name]) => `<button type="button" data-action="dimension-tab" data-id="${key}" aria-pressed="${key === p.tab}" class="${key === p.tab ? "active" : ""}">${name}</button>`).join("")}</nav><div id="dimension-picker-options">${dimensionPickerRows()}</div></div><footer><span id="dimension-picker-count">${cross ? "最多交叉 3 个维度" : "多选时分别取数"}</span><div class="p-actions">${p.tab === "custom" ? btn("new-owned-dimension", "新建 SQL 维度", "code-2", "link") : ""}${btn("dimension-picker-confirm", "添加所选", "check", "primary")}</div></footer></div>`;
   }
   function dimensionReferencesHTML(group) {
     const ability = dimensionOwner();
@@ -352,13 +411,13 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   function dimensionsHTML() {
     const ability = dimensionOwner();
     const groups = activeGroups(ability);
-    return `<div class="c-dimension-toolbar"><label class="c-overall-switch"><input type="checkbox" role="switch" data-model="dimension-overall" ${hasOverallData() && showsOverall(ability) ? "checked" : ""} ${hasOverallData() ? "" : "disabled"}><span class="c-switch-track"></span><span>展示不拆分维度的数据</span></label>${!hasOverallData() && ability.metrics.some((r) => r.metricKeys.length) ? '<span class="c-dimension-note">当前指标未提供整体 SQL</span>' : ""}<div class="p-actions">${btn("dimension-pick-single", "添加维度", "plus")}${btn("dimension-pick-cross", "交叉维度", "combine", "", 'title="最多支持交叉 4 个维度"')}</div></div><div class="c-dimension-sources"><span>维度来源</span>${Object.entries(dimensionCategoryLabels).map(([key, label]) => btn("dimension-pick-source", label, key === "builtin" ? "chart-no-axes-column" : key === "public" ? "library" : "code-2", "", `data-source="${key}"`)).join("")}</div><div class="c-dimension-anchor">${dimensionPickerHTML()}</div>
+    return `<div class="c-dimension-toolbar"><label class="c-overall-switch"><input type="checkbox" role="switch" data-model="dimension-overall" ${hasOverallData() && showsOverall(ability) ? "checked" : ""} ${hasOverallData() ? "": "disabled"}><span class="c-switch-track"></span><span>展示不拆分维度的数据</span></label>${!hasOverallData() && ability.metrics.some((r) => r.metricKeys.length) ? '<span class="c-dimension-note">当前指标未提供整体 SQL</span>' : ""}<div class="p-actions">${btn("dimension-pick-single", "添加维度", "plus")}${btn("dimension-pick-cross", "交叉维度", "combine", "", 'title="最多支持交叉 3 个维度"')}</div></div><div class="c-dimension-sources"><span>维度来源</span>${Object.entries(dimensionCategoryLabels).map(([key, label]) => btn("dimension-pick-source", label, key === "builtin" ? "chart-no-axes-column" : key === "public" ? "library" : "code-2", "", `data-source="${key}"`)).join("")}</div><div class="c-dimension-anchor">${dimensionPickerHTML()}</div>
       <div class="c-inline-dimension-host" data-dimension-editor-host></div><div class="c-dimension-cards">${groups.length ? groups.map((g) => {
         const dims = groupDimensions(g);
         return `<article class="c-dimension-card ${g.cross ? "is-cross" : ""}" data-group-id="${g.id}"><header><span>${g.cross ? icon("combine") + "交叉维度" : "单维拆分"}${g.queryItemId ? badge("SQL 已定义粒度", "purple") : ""}</span>${btn("dimension-remove-group", "", "x", "link", `data-id="${g.id}" aria-label="移除 ${esc(g.name)}"`)}</header>${dims.map((d) => {
           const selected = g.valueFilters?.[d.key], values = selected || d.values;
           return `<div class="c-dimension-row"><div class="c-dimension-name"><strong>${esc(d.name)}</strong><small>${dimensionCategoryLabels[d.category]}</small></div><button type="button" class="c-dimension-values" data-action="dimension-values" data-id="${g.id}" data-key="${esc(d.key)}" aria-label="选择 ${esc(d.name)} 的拆解取值"><span>拆解</span>${values.length ? values.slice(0, 3).map((v) => `<b>${esc(v === null ? "NULL" : v)}</b>`).join("") + (values.length > 3 ? `<b>+${values.length - 3}</b>` : "") : "<b>全部取值</b>"}${!selected && values.length ? '<small>全部</small>' : ""}${icon("chevron-down")}</button>${g.cross && !g.queryItemId ? btn("dimension-remove-member", "", "x", "link", `data-id="${g.id}" data-member="${d.itemId}" aria-label="移除交叉成员 ${esc(d.name)}"`) : ""}</div>`;
-        }).join("")}${g.cross && !g.queryItemId && dims.length < 4 ? btn("dimension-pick-member", "请选择维度", "plus", "link c-add-cross-member", `data-id="${g.id}"`) : ""}
+        }).join("")}${g.cross && !g.queryItemId && dims.length < MAX_CROSS_DIMENSIONS ? btn("dimension-pick-member", "请选择维度", "plus", "link c-add-cross-member", `data-id="${g.id}"`) : ""}
         <details class="c-dimension-settings"><summary>更多设置</summary><div class="p-form-grid two">${input("名称", `group.${g.id}.name`, g.name)}${input("说明（选填）", `group.${g.id}.description`, g.description)}</div>${ability.savedAt ? readonlyField("Key（系统生成）", g.key) : ""}${dimensionReferencesHTML(g)}<div class="p-actions">${btn("view-group-sql", "查看 SQL", "code-2", "link", `data-id="${g.id}"`)}</div></details></article>`;
       }).join("") : '<div class="c-dimensions-empty">添加维度，查看指标在不同人群中的分布</div>'}</div>`;
   }
@@ -378,7 +437,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     options.innerHTML = dimensionPickerRows();
     const members = ability.groups.find((g) => g.id === dimensionPicker.target)?.members.length || 0;
     const count = dimensionPicker.selected.length;
-    outlet.querySelector("#dimension-picker-count").textContent = `已选 ${count} 项${dimensionPicker.target === "single" ? " · 分别取数" : ` · 交叉最多 4 项${members ? `（已有 ${members} 项）` : ""}`}`;
+    outlet.querySelector("#dimension-picker-count").textContent = `已选 ${count} 项${dimensionPicker.target === "single" ? " · 分别取数" : ` · 交叉最多 3 项${members ? `（已有 ${members} 项）` : ""}`}`;
     outlet.querySelector('[data-action="dimension-picker-confirm"]').disabled = !count || (dimensionPicker.target === "new" && count < 2);
   }
   function openDimensionPicker(target, tab) {
@@ -572,12 +631,39 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   function singleCrossDimensionsHTML(source) {
     const dimensions = outputDimensions(source);
     const label = (key) => dimensions.find((field) => field.key === key)?.name || key;
-    const rows = (ability.crossDimensions || []).map((cross) => `<div class="c-cross-result"><div><strong>${esc(cross.name)}</strong><span>${esc(label(cross.leftDimensionKey))} × ${esc(label(cross.rightDimensionKey))}</span></div>${badge(cross.status === "generated" ? "AI 已生成" : "生成失败", cross.status === "generated" ? "green" : "amber")}<div class="p-actions">${btn("single-view-cross-sql", "查看 / 编辑", "code-2", "link", `data-id="${esc(cross.id)}"`)}${btn("single-cross-delete", "", "trash-2", "link quiet-danger", `data-id="${esc(cross.id)}" aria-label="删除 ${esc(cross.name)}"`)}</div></div>`).join("");
-    const draft = singleCrossDraft?.abilityId === ability.id ? singleCrossDraft : null;
-    const options = [["", "请选择维度"], ...dimensions.map((field) => [field.key, field.name])];
-    const duplicate = draft?.left && draft?.right && (ability.crossDimensions || []).some((cross) => [cross.leftDimensionKey, cross.rightDimensionKey].sort().join("|") === [draft.left, draft.right].sort().join("|"));
-    const valid = draft?.left && draft?.right && draft.left !== draft.right && !duplicate && !draft.generating;
-    return `<div class="c-cross-toolbar">${btn("single-cross-new", "新增交叉维度", "plus", "", dimensions.length >= 2 && !draft ? "" : "disabled")}</div>${draft ? `<div class="c-cross-builder"><div>${select("维度 A", "single-cross.left", options, draft.left)}<span>×</span>${select("维度 B", "single-cross.right", options, draft.right)}</div><div class="p-actions">${btn("single-cross-cancel", "删除", "trash-2")}${btn("single-cross-generate", draft.generating ? "AI 正在生成…" : "生成组合 SQL", draft.generating ? "loader-circle" : "wand-sparkles", `primary ${draft.generating ? "is-loading" : ""}`, valid ? "" : "disabled")}</div>${draft.left && draft.left === draft.right ? '<small class="c-field-error">请选择两个不同维度</small>' : duplicate ? '<small class="c-field-error">相同组合已存在</small>' : draft.error ? `<small class="c-field-error">${esc(draft.error)}</small>` : ""}</div>` : ""}<div class="c-cross-results">${rows || '<div class="c-dimensions-empty">尚未添加交叉维度，只会生成你主动选择的组合</div>'}</div>`;
+    const crosses = ability.crossDimensions || [];
+    const rows = crosses.map((cross, index) => {
+      const keys = crossDimensionKeys(cross);
+      const combination = [...keys].sort().join("|");
+      const complete = keys.length >= 2 && keys.length <= MAX_CROSS_DIMENSIONS && keys.every((key) => dimensions.some((field) => field.key === key));
+      const repeated = new Set(keys.filter(Boolean)).size !== keys.filter(Boolean).length;
+      const duplicate = complete && crosses.some((other) => other.id !== cross.id && [...crossDimensionKeys(other)].sort().join("|") === combination);
+      const generating = generatingCrosses.has(cross.id);
+      const valid = complete && !repeated && !duplicate && !generating;
+      const attrs = `data-id="${esc(cross.id)}"`;
+      if (cross.status === "generated") return `<div class="c-cross-result" data-cross-id="${esc(cross.id)}"><div><strong>${esc(cross.name)}</strong><span>${keys.map((key) => esc(label(key))).join(" × ")}</span></div>${badge("AI 已生成", "green")}<div class="p-actions">${btn("single-cross-edit", "修改维度", "square-pen", "link", attrs)}${btn("single-view-cross-sql", "查看 / 编辑 SQL", "code-2", "link", attrs)}${btn("single-cross-delete", "", "trash-2", "link quiet-danger", `${attrs} aria-label="删除 ${esc(cross.name)}"`)}</div></div>`;
+      const options = [["", "请选择维度"], ...dimensions.map((field) => [field.key, field.name])];
+      const fields = keys.map((key, member) => `${member ? "<span>×</span>" : ""}${select(`维度 ${["A", "B", "C"][member] || member + 1}`, `single-cross.${cross.id}.${member}`, options, key, `aria-label="交叉维度 ${index + 1} 的维度 ${["A", "B", "C"][member] || member + 1}" ${generating ? "disabled" : ""}`)}`).join("");
+      const error = repeated ? "请选择不同的维度" : duplicate ? "相同组合已存在" : cross.error || "";
+      return `<div class="c-cross-builder" data-cross-id="${esc(cross.id)}"><div class="c-cross-fields ${keys.length === 3 ? "has-three" : ""}">${fields}</div><div class="p-actions">${keys.length < MAX_CROSS_DIMENSIONS ? btn("single-cross-add-member", "添加第三个维度", "plus", "link", `${attrs} ${dimensions.length >= 3 && !generating ? "" : "disabled"}`) : keys.length === MAX_CROSS_DIMENSIONS ? btn("single-cross-remove-member", "移除第三个维度", "minus", "link", `${attrs} ${generating ? "disabled" : ""}`) : ""}${btn("single-cross-delete", "删除", "trash-2", "", `${attrs} ${generating ? "disabled" : ""}`)}${btn("single-cross-generate", generating ? "AI 正在生成…" : "生成组合 SQL", generating ? "loader-circle" : "wand-sparkles", `primary ${generating ? "is-loading" : ""}`, `${attrs} ${valid ? "" : "disabled"}`)}</div>${error ? `<small class="c-field-error" role="alert">${esc(error)}</small>` : ""}</div>`;
+    }).join("");
+    return `<div class="c-cross-toolbar">${btn("single-cross-new", "新增交叉维度", "plus", "", dimensions.length >= 2 ? "" : "disabled")}</div><div class="c-cross-results">${rows || '<div class="c-dimensions-empty">尚未添加交叉维度</div>'}</div>`;
+  }
+  function refreshSingleCrossDimensions(focusModel) {
+    const section = outlet.querySelector("#single-cross-dimensions");
+    if (!section) return;
+    const content = section.querySelector(".c-cross-toolbar");
+    content?.nextElementSibling?.remove();
+    content?.remove();
+    section.insertAdjacentHTML("beforeend", singleCrossDimensionsHTML(abilitySqlItem()));
+    if (issues.length) {
+      issues = abilityPublishIssues(store, ability);
+      const alerts = outlet.querySelector(".c-single-sql-page > .p-issues");
+      if (alerts) alerts.outerHTML = issuesHTML(issues);
+    }
+    if (abilityLoadReadOnly(ability)) section.querySelectorAll("select, button:not([data-action='single-view-cross-sql'])").forEach((element) => { element.disabled = true; });
+    refreshIcons();
+    if (focusModel) section.querySelector(`[data-model="${CSS.escape(focusModel)}"]`)?.focus({ preventScroll: true });
   }
   function bindSingleSqlEditor() {
     const editor = outlet.querySelector("#single-sql-editor");
@@ -620,13 +706,13 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       : status;
     outlet.innerHTML = `<div class="c-single-sql-page">${header(panelTitle, "通过一整套完整 SQL 定义取数指标和维度，系统将自动解析并生成可编辑配置。", headerActions)}
       ${identity}${issuesHTML(issues)}
-      ${section("基础信息", "", `<div class="c-single-basic">${singleBasicField("名称", "name", ability.name, 50)}${singleBasicField("说明", "description", ability.description, 200, true)}${singleBasicField("业务目标", "goal", ability.goal)}</div>`)}
+      ${section("基础信息", "", `<div class="c-single-basic">${singleBasicField("名称", "name", ability.name, 50)}${singleBasicField("业务目标", "goal", ability.goal)}${singleBasicField("说明", "description", ability.description, 200, true)}</div>`)}
       ${section("可引用上下文", "搜索上下文名称或 Key，点击插入 SQL。试跑时自动替换为当前实验信息。", singleContextHTML(), "", "single-context-section")}
       ${section("自定义 SQL", "请输入一整套完整取数 SQL。系统会解析其中输出的指标和维度，并生成可人工修改的指标配置、维度配置及拆分 SQL。", singleEditorHTML(source))}
       <div id="single-parse-results" ${parsed ? "" : "hidden"}>
         ${section("SQL 输出指标", "", singleMetricsHTML(source), "", "single-metrics")}
         ${section("SQL 输出维度", "", singleDimensionsHTML(source), "", "single-dimensions")}
-        ${section("交叉维度", "选择两个已识别维度后，系统会生成对应的组合分析 SQL。交叉维度仅在主动选择后生成，不会自动遍历全部组合。", singleCrossDimensionsHTML(source), "", "single-cross-dimensions")}
+        ${section("交叉维度", "每组选择 2–3 个维度，可新增多组并分别生成组合 SQL。", singleCrossDimensionsHTML(source), "", "single-cross-dimensions")}
       </div>
       <div id="composer-publication-history" data-history-revision="${esc(historyRevision(ability, "ability"))}">${publicationHistory.render(ability, "ability", versionsHTML(ability, "ability"))}</div>
       <footer class="c-single-sticky-actions"><div>${isNew && !readonly ? btn("single-example", "恢复示例", "rotate-ccw", "link") : ""}</div><div class="p-actions">${btn("single-cancel", "取消")}${readonly ? (canEditDefinition(ability) ? btn("edit-ability", "编辑", "square-pen", "primary", `data-id="${esc(ability.id)}"`) : "") : `${btn("single-save", "保存草稿", "save")}${btn("single-publish", "校验并发布", "upload", "primary", busyAttr(parsing.has(source.id)))}`}</div></footer>
@@ -684,9 +770,9 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     }).filter((r) => !valid || showsOverall(ability) || r.snapshot?.kind !== "overall");
     const record = records.find((r) => r.id === selectedRecord) || records[0];
     const body = !run ? `<div class="p-empty">${icon("play")}<p>运行整个能力，分别核对整体和各下钻组的取数结果。</p></div>` :
-      `<div class="p-result-summary"><div class="p-row">${badge(statuses[run.status], run.status === "success" ? "green" : "amber")}${badge(valid ? "当前配置" : "历史 / 待验证")}<span>${run.records.length} 份执行 · ${esc(run.id)}</span></div></div>${issuesHTML(run.error ? [run.error] : [])}${run.status === "running" ? `<div class="p-progress"><span></span>正在运行各指标来源与下钻组合…</div>` : ""}
+      `<div class="p-result-summary"><div class="p-row">${badge(statuses[run.status], run.status === "success" ? "green" : "amber")}${badge(valid ? "当前配置" : run.partial ? "所选证据" : "历史 / 待验证")}<span>${run.records.length} 份执行 · ${esc(run.id)}</span></div></div>${issuesHTML(run.error ? [run.error] : [])}${run.status === "running" ? `<div class="p-progress"><span></span>正在运行各指标来源与下钻组合…</div>` : ""}
       <div class="p-mode-tabs">${records.map((r) => btn("select-record", `${esc(r.modeName)} · ${r.rawRows?.length || 0} 行`, "", r === record ? "active" : "", `data-id="${r.id}"`)).join("")}</div>${record ? resultDetails(record) : ""}
-      ${canEditDefinition(ability) ? `<div class="p-confirm-result">${check("已逐一核对全部结果、指标口径和下钻粒度", "approve-ability", valid && run.approvedFor === abilitySignature(store, ability), valid && ability.scenario === "normal" ? "" : "disabled")}${!valid ? `<small>当前配置或本次运行未通过全部验证，需重新整体试跑。</small>` : ""}</div>` : ""}`;
+      ${canEditDefinition(ability) && !run.partial ? `<div class="p-confirm-result">${check("已逐一核对全部结果、指标口径和下钻粒度", "approve-ability", valid && run.approvedFor === abilitySignature(store, ability), valid && ability.scenario === "normal" ? "" : "disabled")}${!valid ? `<small>当前配置或本次运行未通过全部验证，需重新整体试跑。</small>` : ""}</div>` : ""}`;
     return section("整体试跑结果", "试跑记录仅属于当前能力，不进入用户侧报告列表。", body, "", "ability-results");
   }
   function editorHTML() {
@@ -839,7 +925,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       ${item.kind === "dimension" ? `<p class="c-config-hint">维度加入能力组后，还需要选择指标来源才能执行分析。</p>` : ""}${!number && !allowDraft && attachDraft.mode === "existing" ? issuesHTML(["这个 SQL 已归属其他能力组，请先独立发布后复用。"]) : ""}`,
       btn("close", "取消") + btn("confirm-attach", attachDraft.mode === "new" ? "新建并保存能力组" : "保存关联并查看能力组", "check", "primary"));
   }
-  function openTrial(kind, id, runId = "", mode = "") {
+  function openTrial(kind, id, runId = "", mode = "", selection = null) {
     const obj = kind === "preset" ? capabilities.find((c) => c.id === id) : (kind === "item" ? store.items : store.abilities).find((o) => o.id === id);
     if (!obj) throw new Error("当前取数配置已不存在。");
     if ((runId || ["record", "history"].includes(mode)) && !canViewHistory(obj)) throw new Error("仅创建人可以查看历史试跑记录。");
@@ -856,7 +942,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     closeDialog();
     const focus = document.activeElement;
     const recordView = ["history", "record"].includes(mode);
-    trialSession = { kind, obj, recordView, mode: mode || (runId ? "result" : "input"), runId,
+    trialSession = { kind, obj, recordView, mode: mode || (runId ? "result" : "input"), runId, selection: selection && clone(selection),
       currentValidation: recordView ? { mode: "input", runId: "", selectedRecord: "", issues: [], scroll: 0 } : null,
       background: { ability, item, presetId, selectedRun, selectedRecord, issues }, hash: location.hash,
       focus, focusModel: focus?.dataset.model, focusAction: focus?.dataset.action,
@@ -897,8 +983,9 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     }
     const obj = item || ability || trialSession.obj, preset = trialKind === "preset" ? presetDraft() : null;
     const context = preset ? (preset.context ||= clone(defaultContext)) : item ? (item.context ||= clone(defaultContext)) : ability.context;
-    const metrics = preset ? preset.metrics.map((name) => ({ name })) : item ? (item.kind === "metric" ? metricFields(item) : []) : ability.metrics.flatMap((r) => metricFields(resolveItem(store, r)).filter((f) => r.metricKeys.includes(f.key)));
-    const dimensions = preset ? preset.dimensions.map((name) => ({ name })) : item
+    const metrics = preset ? preset.metrics.map((name) => ({ name })) : item ? (item.kind === "metric" ? metricFields(item) : []) : ability.metrics.flatMap((r) => metricFields(resolveItem(store, r)).filter((f) => r.metricKeys.includes(f.key)
+      && (!trialSession.selection || trialSession.selection.metrics.includes(JSON.stringify([r.itemId, f.key])))));
+    let dimensions = preset ? preset.dimensions.map((name) => ({ name })) : item
       ? (item.kind === "dimension" ? [{ name: item.draft.dimensionName }] : outputDimensions(item))
       : ability.singleSqlFlow
         ? outputDimensions(resolveItem(store, ability.metrics.find((reference) => reference.itemId === ability.sqlItemId) || ability.metrics[0]))
@@ -911,7 +998,13 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
           }))
         ]).values()];
     let modes = item ? [{ id: item.id, name: item.name }] : preset ? (preset.dimensions.length ? preset.dimensions : ["整体"]).map((name) => ({ id: name, name })) : [];
-    if (ability) { try { modes = abilityModes(store, ability); } catch { /* Fetch validates configuration in this module. */ } }
+    if (ability) {
+      try {
+        modes = abilityTrialModes(store, ability, trialSession.selection);
+        if (trialSession.selection) dimensions = [...new Map(modes.flatMap((mode) =>
+          mode.fields.filter((field) => field.role === "dimension").map((field) => [field.key, field]))).values()];
+      } catch { /* Fetch validates configuration in this module. */ }
+    }
     return { obj, preset, context, metrics, dimensions, modes };
   }
   function currentTrialRun() {
@@ -1035,7 +1128,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       if (!snapshot) return "";
       return `<div class="c-trial-tasks" aria-label="当次取数任务">${snapshot.modes.map((mode) => {
         const record = snapshot.records.find((entry) => mode.recordId ? entry.id === mode.recordId : entry.modeId === mode.id);
-        const state = record?.status || mode.status || (snapshot.run.status === "running" ? "queued" : "");
+        const state = record?.status || mode.status || (snapshot.run.status === "running" ? "queued" : snapshot.run.status);
         return `<div><span>${esc(mode.name)}</span>${badge(state === "queued" ? "等待取数" : trialRecordStatus({ status: state }), state === "success" ? "green" : "")}</div>`;
       }).join("") || '<p class="p-muted">取数任务未记录。</p>'}</div>`;
     }
@@ -1061,7 +1154,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       <div class="c-trial-content"><div class="c-trial-evidence"><span>已选证据</span><strong>${metrics.length} 个指标</strong><strong>${dimensions.length} 个下钻维度</strong><div>${metrics.map((f) => badge(`指标 · ${f.name}`)).join("")}${dimensions.map((d) => badge(`下钻 · ${d.name}`)).join("")}</div></div>
       <section class="c-trial-context"><header>${icon("flask-conical")}<strong>输入实验 ID 和观测时间并获取数据</strong></header><div class="c-trial-inputs">${input("实验 ID", "context.libra_id", context.libra_id, `placeholder="例如：4823214" inputmode="numeric" ${busyAttr(busy)}`)}<div><span class="c-trial-label">观测时间</span><div class="c-trial-dates">${input("开始", "context.start_date", context.start_date, `type="date" aria-label="观测开始日期" ${busyAttr(busy)}`)}<span>→</span>${input("结束", "context.end_date", context.end_date, `type="date" aria-label="观测结束日期" ${busyAttr(busy)}`)}</div></div></div><div class="c-trial-experiment" id="trial-experiment" ${context.libra_id ? "" : "hidden"}>${experimentHTML(context)}</div><details class="c-trial-advanced"><summary>更多上下文参数</summary><div class="p-form-grid two">${parameterCatalog.filter((p) => !["libra_id", "start_date", "end_date"].includes(p.key)).map((p) => input(p.name, `context.${p.key}`, context[p.key], busyAttr(busy))).join("")}</div></details><footer><div>取数计划：<strong>${modes.length} 个任务</strong><p>仅获取所选下钻维度或单独配置的整体数据</p></div>${btn("trial-run", busy ? "正在获取数据…" : "获取数据", busy ? "loader-circle" : "database", `primary ${busy ? "is-loading" : ""}`, busyAttr(busy))}</footer></section>
       <div id="trial-validation">${issuesHTML(issues)}</div><div id="trial-tasks">${trialTasksHTML(modes)}</div><div id="trial-results">${trialResultsHTML()}</div></div>
-      <footer class="c-trial-footer"><div class="p-actions">${btn("close-trial", preset ? "返回指标选择" : "返回配置")}<span class="c-progress-action" data-progress="publish">${preset || trialSession.mode !== "result" ? "" : publishEntryHTML(pageProgress(obj), item ? "item" : "ability", true)}</span></div></footer>`;
+      <footer class="c-trial-footer"><div class="p-actions">${btn("close-trial", preset || trialSession.selection ? "返回指标选择" : "返回配置")}<span class="c-progress-action" data-progress="publish">${preset || trialSession.mode !== "result" ? "" : publishEntryHTML(pageProgress(obj), item ? "item" : "ability", true)}</span></div></footer>`;
     body.querySelector(".c-trial-advanced").open = advancedOpen;
     body.scrollTop = scroll; refreshIcons();
     if (active) {
@@ -1291,12 +1384,12 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     }
     const validDimensions = new Set(outputDimensions(source).map((field) => field.key));
     ability.crossDimensions = (ability.crossDimensions || []).filter((cross) =>
-      validDimensions.has(cross.leftDimensionKey) && validDimensions.has(cross.rightDimensionKey));
+      crossDimensionKeys(cross).every((key) => !key || validDimensions.has(key)));
     for (const cross of ability.crossDimensions) {
       const dimensions = outputDimensions(source);
-      cross.name = `${dimensions.find((field) => field.key === cross.leftDimensionKey)?.name || cross.leftDimensionKey} × ${dimensions.find((field) => field.key === cross.rightDimensionKey)?.name || cross.rightDimensionKey}`;
-      cross.splitSql = singleSqlSplitSQL(source, [cross.leftDimensionKey, cross.rightDimensionKey]);
-      cross.status = "generated";
+      const keys = crossDimensionKeys(cross);
+      cross.name = keys.map((key) => dimensions.find((field) => field.key === key)?.name || key).join(" × ");
+      if (cross.status === "generated") cross.splitSql = singleSqlSplitSQL(source, keys);
     }
     const reference = ability.metrics.find((candidate) => candidate.itemId === source.id);
     reference.metricKeys = metricFields(source).map((field) => field.key);
@@ -1371,7 +1464,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     const readonly = abilityLoadReadOnly(ability);
     const dimensionKeys = type === "dimension"
       ? [target.key]
-      : [target.leftDimensionKey, target.rightDimensionKey];
+      : crossDimensionKeys(target);
     openDialog(`维度拆分 SQL：${esc(name)}`,
       `<p class="c-config-help">该 SQL 由 AI 基于完整 SQL 拆分生成，请在发布前确认口径是否正确。</p><div class="c-single-split-meta">${readonlyField("维度名称", name)}${readonlyField("维度 Key", dimensionKeys.join(" × "))}${readonlyField("生成状态", target.splitSql ? "AI 已生成" : "待生成")}</div>${readonly
         ? `<pre class="c-single-split-readonly">${esc(singleSplitSqlDraft.value)}</pre>`
@@ -1688,7 +1781,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         if (!field) throw new Error("该维度已不存在。");
         field.role = "auxiliary";
         ability.crossDimensions = (ability.crossDimensions || []).filter((cross) =>
-          cross.leftDimensionKey !== field.key && cross.rightDimensionKey !== field.key);
+          !crossDimensionKeys(cross).includes(field.key));
         syncMetrics(source);
         persist();
         renderSingleSqlAbility();
@@ -1700,53 +1793,66 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       if (a === "single-split-save") { assertMutable(ability); saveSingleSplitSql(); return; }
       if (a === "single-cross-new") {
         assertMutable(ability);
-        singleCrossDraft = { abilityId: ability.id, left: "", right: "", generating: false, error: "" };
-        renderSingleSqlAbility();
+        if (outputDimensions(abilitySqlItem()).length < 2) throw new Error("至少需要两个可用维度。");
+        const cross = { id: uid("cross"), name: "交叉维度", dimensionKeys: ["", ""], splitSql: "", status: "draft" };
+        ability.crossDimensions.push(cross);
+        persist();
+        refreshSingleCrossDimensions(`single-cross.${cross.id}.0`);
         return;
       }
-      if (a === "single-cross-cancel") {
-        singleCrossDraft = undefined;
-        renderSingleSqlAbility();
+      if (["single-cross-add-member", "single-cross-remove-member", "single-cross-edit"].includes(a)) {
+        assertMutable(ability);
+        const cross = ability.crossDimensions.find((candidate) => candidate.id === id);
+        if (!cross || generatingCrosses.has(cross.id)) return;
+        const keys = crossDimensionKeys(cross);
+        if (a === "single-cross-add-member") {
+          if (keys.length >= MAX_CROSS_DIMENSIONS) throw new Error("单组交叉最多支持 3 个维度。");
+          keys.push("");
+        } else if (a === "single-cross-remove-member") keys.pop();
+        cross.dimensionKeys = keys;
+        cross.status = "draft";
+        cross.splitSql = "";
+        cross.error = "";
+        persist();
+        refreshSingleCrossDimensions(`single-cross.${cross.id}.${a === "single-cross-add-member" ? 2 : 0}`);
         return;
       }
       if (a === "single-cross-generate") {
         assertMutable(ability);
+        const owner = ability;
         const source = abilitySqlItem();
-        const draft = singleCrossDraft;
-        if (!draft || draft.abilityId !== ability.id || !draft.left || !draft.right || draft.left === draft.right)
-          throw new Error("请选择两个不同维度。");
-        const pair = [draft.left, draft.right].sort().join("|");
-        if ((ability.crossDimensions || []).some((cross) => [cross.leftDimensionKey, cross.rightDimensionKey].sort().join("|") === pair))
+        const cross = owner.crossDimensions.find((candidate) => candidate.id === id);
+        if (!cross || generatingCrosses.has(cross.id)) return;
+        const keys = crossDimensionKeys(cross);
+        if (keys.length < 2 || keys.length > MAX_CROSS_DIMENSIONS || keys.some((key) => !key) || new Set(keys).size !== keys.length)
+          throw new Error("请选择 2–3 个不同维度。");
+        const combination = [...keys].sort().join("|");
+        if (owner.crossDimensions.some((other) => other.id !== id && [...crossDimensionKeys(other)].sort().join("|") === combination))
           throw new Error("相同交叉维度已存在。");
-        draft.generating = true;
-        draft.error = "";
-        const scroll = window.scrollY;
-        renderSingleSqlAbility();
-        window.scrollTo(0, scroll);
+        generatingCrosses.add(cross.id);
+        cross.error = "";
+        const sql = source.draft.sql;
+        refreshSingleCrossDimensions();
         try {
           await new Promise((resolve) => setTimeout(resolve, 700));
+          if (!owner.crossDimensions.includes(cross) || source.draft.sql !== sql) throw new Error("配置已变更，请重新生成组合 SQL。");
+          if (crossDimensionKeys(cross).join("|") !== keys.join("|")) throw new Error("所选维度已变更，请重新生成组合 SQL。");
+          if (owner.crossDimensions.some((other) => other.id !== id && [...crossDimensionKeys(other)].sort().join("|") === combination))
+            throw new Error("相同交叉维度已存在。");
           const dimensions = outputDimensions(source);
-          const left = dimensions.find((field) => field.key === draft.left);
-          const right = dimensions.find((field) => field.key === draft.right);
-          if (!left || !right) throw new Error("所选维度已失效，请重新选择。");
-          ability.crossDimensions.push({
-            id: uid("cross"),
-            name: `${left.name} × ${right.name}`,
-            leftDimensionKey: left.key,
-            rightDimensionKey: right.key,
-            splitSql: singleSqlSplitSQL(source, [left.key, right.key]),
-            status: "generated"
-          });
-          singleCrossDraft = undefined;
-          persist();
-          renderSingleSqlAbility();
-          window.scrollTo(0, scroll);
+          const members = keys.map((key) => dimensions.find((field) => field.key === key));
+          if (members.some((field) => !field)) throw new Error("所选维度已失效，请重新选择。");
+          cross.name = members.map((field) => field.name).join(" × ");
+          cross.dimensionKeys = keys;
+          cross.splitSql = singleSqlSplitSQL(source, keys);
+          cross.status = "generated";
           showToast("交叉维度 SQL 已生成");
         } catch (error) {
-          draft.generating = false;
-          draft.error = error.message;
-          renderSingleSqlAbility();
-          window.scrollTo(0, scroll);
+          cross.error = error.message;
+        } finally {
+          generatingCrosses.delete(cross.id);
+          persist();
+          if (ability === owner) refreshSingleCrossDimensions();
         }
         return;
       }
@@ -1754,7 +1860,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         assertMutable(ability);
         ability.crossDimensions = (ability.crossDimensions || []).filter((cross) => cross.id !== id);
         persist();
-        renderSingleSqlAbility();
+        refreshSingleCrossDimensions();
         return;
       }
       if (a === "ability-load") { openAbilityLoader(); return; }
@@ -1792,7 +1898,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         const p = dimensionPicker, options = dimensionOptions(), selected = p.selected.map((id) => options.find((d) => d.id === id));
         if (!selected.length || selected.some((d) => !d || d.reason)) throw new Error("请重新选择可用维度。");
         const target = ability.groups.find((g) => g.id === p.target);
-        if (p.target !== "single" && (selected.length + (target?.members.length || 0) > 4 || (p.target === "new" && selected.length < 2))) throw new Error("交叉维度请选择 2–4 个不同成员。");
+        if (p.target !== "single" && (selected.length + (target?.members.length || 0) > MAX_CROSS_DIMENSIONS || (p.target === "new" && selected.length < 2))) throw new Error("交叉维度请选择 2–3 个不同成员。");
         for (const d of selected.filter((d) => !d.queryItemId)) {
           if (!ability.dimensions.some((r) => r.itemId === d.id)) ability.dimensions.push(clone(d.ref));
         }
@@ -1891,10 +1997,31 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         location.hash = `/ability/${ability.id}`;
         return;
       }
+      if (a === "catalog-expand") {
+        const obj = store.abilities.find((obj) => obj.id === id);
+        if (!obj) throw new Error("当前取数能力已不存在。");
+        const draft = catalogDraft(obj), panel = trigger.closest("[data-managed-id]");
+        draft.expanded = !draft.expanded;
+        panel.classList.toggle("expanded", draft.expanded);
+        panel.querySelector(".capability-content").hidden = !draft.expanded;
+        panel.querySelectorAll('[data-action="catalog-expand"]').forEach((button) => button.setAttribute("aria-expanded", String(draft.expanded)));
+        panel.querySelector(".expand-button").innerHTML = `${icon(draft.expanded ? "chevron-up" : "chevron-down")}<span>${draft.expanded ? "收起" : "展开"}</span>`;
+        persist(); refreshIcons(); return;
+      }
+      if (a === "catalog-select-all") {
+        const obj = store.abilities.find((obj) => obj.id === id), content = abilityCatalogContent(store, obj), draft = catalogDraft(obj, content);
+        const available = content.metrics.filter((field) => field.available).map((field) => field.id);
+        draft.metrics = available.every((id) => draft.metrics.includes(id)) ? [] : available;
+        const panel = trigger.closest("[data-managed-id]");
+        panel.querySelectorAll('[data-model="catalog-metric"]').forEach((checkbox) => { checkbox.checked = draft.metrics.includes(checkbox.value); });
+        persist(); refreshCatalogPanel(panel, obj, content); return;
+      }
       if (a === "run-catalog") {
         const target = store.abilities.find((obj) => obj.id === id), actions = abilityCatalogActions(store, target);
         if (!actions.trial) throw new Error("请先完成取数配置后再试跑。");
-        openTrial("ability", id, actions.trial.runId, actions.trial.history ? "record" : "input"); return;
+        const selection = actions.trial.history || !trigger.closest("[data-managed-id]") ? null : catalogTrialSelection(target);
+        if (selection) abilityTrialModes(store, target, selection);
+        openTrial("ability", id, actions.trial.runId, actions.trial.history ? "record" : "input", selection); return;
       }
       if (a === "trial-history-catalog") { openTrial("ability", id, "", "history"); return; }
       if (a === "trial-history") { showTrialHistory("history"); return; }
@@ -2102,7 +2229,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         };
         try {
           if (targetItem) await runItem(targetItem, targetItem.context || defaultContext, targetItem.scenario || "normal", update);
-          else await runAbility(store, targetAbility, update);
+          else await runAbility(store, targetAbility, update, session.selection);
         } finally { busy = false; update(); } return;
       }
       if (a === "analysis-context") {
@@ -2179,6 +2306,17 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     const el = e.target, model = el.dataset.model; if (!model) return;
     if (el.disabled) return;
     if (trialSession?.recordView) return;
+    if (["catalog-metric", "catalog-dimension", "catalog-metric-search"].includes(model)) {
+      if (e.type !== (model === "catalog-metric-search" ? "input" : "change")) return;
+      const panel = el.closest("[data-managed-id]"), obj = store.abilities.find((obj) => obj.id === panel.dataset.managedId);
+      const content = abilityCatalogContent(store, obj), draft = catalogDraft(obj, content);
+      if (model === "catalog-metric-search") draft.search = el.value;
+      else {
+        const key = model === "catalog-metric" ? "metrics" : "dimensions";
+        draft[key] = [...panel.querySelectorAll(`[data-model="${model}"]:checked`)].map((checkbox) => checkbox.value);
+      }
+      persist(); refreshCatalogPanel(panel, obj, content); return;
+    }
     if (model === "single-context-search") {
       if (e.type !== "input") return;
       singleContextSearch = el.value;
@@ -2219,9 +2357,15 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     }
     if (kind === "single-cross") {
       try { assertMutable(ability); } catch (error) { showToast(error.message); return; }
-      if (!singleCrossDraft || singleCrossDraft.abilityId !== ability.id) return;
-      singleCrossDraft[key] = value;
-      renderSingleSqlAbility();
+      const cross = ability.crossDimensions.find((candidate) => candidate.id === key);
+      if (!cross || generatingCrosses.has(cross.id)) return;
+      cross.dimensionKeys = crossDimensionKeys(cross);
+      cross.dimensionKeys[Number(detail)] = value;
+      cross.status = "draft";
+      cross.splitSql = "";
+      cross.error = "";
+      persist();
+      refreshSingleCrossDimensions(el.dataset.model);
       return;
     }
     if (kind === "single-sql") {
@@ -2266,20 +2410,20 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       field[detail] = value;
       if (detail === "key") {
         for (const cross of ability.crossDimensions || []) {
-          if (cross.leftDimensionKey === previousKey) cross.leftDimensionKey = value;
-          if (cross.rightDimensionKey === previousKey) cross.rightDimensionKey = value;
+          cross.dimensionKeys = crossDimensionKeys(cross).map((key) => key === previousKey ? value : key);
         }
       }
       try {
         field.splitSql = singleSqlSplitSQL(source, [field.key]);
         for (const cross of ability.crossDimensions || []) {
-          cross.splitSql = singleSqlSplitSQL(source, [cross.leftDimensionKey, cross.rightDimensionKey]);
-          cross.status = "generated";
+          cross.name = crossDimensionKeys(cross).map((key) => outputDimensions(source).find((dimension) => dimension.key === key)?.name || key).join(" × ");
+          if (cross.status === "generated") cross.splitSql = singleSqlSplitSQL(source, crossDimensionKeys(cross));
         }
       } catch {
         field.splitSql = "";
       }
       persist();
+      refreshSingleCrossDimensions();
       return;
     }
     try {
@@ -2489,7 +2633,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   window.addEventListener("hashchange", () => {
     publicationHistory.reset(); trialHistory.reset(); dimensionDialog.close(false); closeDialog();
     if (trialSession) closeTrial();
-    dimensionPicker = undefined; valueDraft = undefined; singleCrossDraft = undefined; singleSplitSqlDraft = undefined;
+    dimensionPicker = undefined; valueDraft = undefined; singleSplitSqlDraft = undefined;
     singleSqlFullscreen = false; document.body.classList.remove("c-sql-fullscreen-open");
     issues = []; selectedRun = ""; selectedRecord = ""; render(); window.scrollTo(0, 0);
   });

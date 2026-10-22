@@ -46,12 +46,12 @@ export function trialSnapshot(obj, runId, kind = "ability") {
   const recordedFields = [...records.flatMap((entry) => entry.fields), ...modes.flatMap((mode) => list(mode.fields))];
   const metrics = recordedFields.filter((field) => field.role === "metric");
   const dimensions = recordedFields.filter((field) => field.role === "dimension");
-  for (const ref of list(definition?.metrics)) {
+  for (const ref of run.selection ? [] : list(definition?.metrics)) {
     const fields = list(ref.definition?.draft?.metricDefinitions ?? ref.definition?.draft?.fields);
     metrics.push(...fields.filter((field) => field.role === "metric"
       && (!Array.isArray(ref.metricKeys) || ref.metricKeys.includes(field.key))));
   }
-  for (const ref of list(definition?.dimensions)) {
+  for (const ref of run.selection ? [] : list(definition?.dimensions)) {
     const draft = ref.definition?.draft;
     if (draft) dimensions.push({ key: draft.dimensionKey, name: draft.dimensionName });
   }

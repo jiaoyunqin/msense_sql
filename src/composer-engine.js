@@ -2,7 +2,8 @@ import {
   clone, uid, hash, slots, identifier, entities, itemDefinition, resolveItem,
   itemIssues, abilityIssues, itemQuerySignature, itemReviewSignature, itemCurrentRun,
   abilityDefinition, abilitySignature, abilityQuerySignature, abilityCurrentRun,
-  directQuery, outputDimensions, syncQueryGroups, completeGroup, currentActor, canEditDefinition, activeGroups, showsOverall
+  directQuery, outputDimensions, syncQueryGroups, completeGroup, currentActor, canEditDefinition, activeGroups, showsOverall,
+  crossDimensionKeys, MAX_CROSS_DIMENSIONS
 } from "./composer-data.js";
 import { parameterCatalog } from "./prototype-data.js";
 import { sqlQuery, parseMode, normalize, analyze } from "./prototype-engine.js";
@@ -251,6 +252,7 @@ function singleSqlResultSource(item, dimensions = []) {
   return `SELECT complete_sql_input.*,\n  ${columns.join(",\n  ")}\nFROM (\n${raw}\n) AS complete_sql_input`;
 }
 export function singleSqlSplitSQL(item, dimensionKeys = []) {
+  if (dimensionKeys.length > MAX_CROSS_DIMENSIONS) throw new Error("单组交叉最多支持 3 个维度。");
   const dimensions = outputDimensions(item).filter((field) => dimensionKeys.includes(field.key));
   if (dimensions.length !== dimensionKeys.length) throw new Error("所选维度已失效，请重新解析 SQL。");
   const metrics = metricFields(item);
@@ -300,8 +302,10 @@ function singleSqlModes(ability) {
       dimension.splitSql || singleSqlSplitSQL(source, [dimension.key])));
   }
   for (const cross of ability.crossDimensions || []) {
-    if (cross.status !== "generated" || !cross.splitSql?.trim()) continue;
-    const members = [cross.leftDimensionKey, cross.rightDimensionKey];
+    const members = crossDimensionKeys(cross);
+    if (members.length < 2 || members.length > MAX_CROSS_DIMENSIONS || new Set(members).size !== members.length || members.some((key) => !dimensions.some((field) => field.key === key)))
+      throw new Error("交叉维度请选择 2–3 个不同且有效的维度。");
+    if (cross.status !== "generated" || !cross.splitSql?.trim()) throw new Error("存在尚未生成完成的交叉维度 SQL。");
     modes.push(createMode(`${source.id}__${cross.id}`, cross.name, members, cross.splitSql));
   }
   return modes;
@@ -321,7 +325,7 @@ export function abilityModes(store, ability) {
       if (group || (!dims.length && definition.includeOverall)) modes.push(compileMode(ref.definition, [], ref.metricKeys, group));
     } else {
       for (const group of groups) {
-        if (group.cross && (group.members.length < 2 || group.members.length > 4)) throw new Error(`${group.name}：交叉支持 2–4 个不同维度。`);
+        if (group.cross && (group.members.length < 2 || group.members.length > MAX_CROSS_DIMENSIONS)) throw new Error(`${group.name}：交叉支持 2–3 个不同维度。`);
         const dimensions = group.members.map((id) => definition.dimensions.find((r) => r.itemId === id)?.definition);
         if (dimensions.some((d) => !d)) throw new Error(`${group.name}：维度来源缺失。`);
         modes.push(compileMode(ref.definition, dimensions, ref.metricKeys, group));
@@ -330,6 +334,32 @@ export function abilityModes(store, ability) {
   }
   if (!modes.length) throw new Error("本次没有已配置的取数任务。");
   return modes;
+}
+export function abilityTrialModes(store, ability, selection) {
+  const modes = abilityModes(store, ability);
+  if (!selection) return modes;
+  const metrics = new Set(selection.metrics), modeIds = new Set(selection.modes);
+  if (!metrics.size) throw new Error("请先选择至少一个指标。");
+  if ([...modeIds].some((id) => !modes.some((mode) => mode.id === id)))
+    throw new Error("所选下钻维度已失效，请重新选择。");
+  const executed = new Set();
+  const selected = modes.filter((mode) => modeIds.has(mode.id)).flatMap((mode) => {
+    const sourceId = mode.sourceDefinitions[0].id;
+    const fields = mode.fields.filter((field) => field.role !== "metric"
+      || metrics.has(JSON.stringify([sourceId, field.key])));
+    const selectedMetrics = fields.filter((field) => field.role === "metric");
+    if (!selectedMetrics.length) return [];
+    selectedMetrics.forEach((field) => executed.add(JSON.stringify([sourceId, field.key])));
+    if (fields.length === mode.fields.length) return [mode];
+    // Project only selected outputs while keeping calculated-metric dependencies
+    // inside the original SQL and preserving the actual dimensional grain.
+    const sql = `SELECT ${fields.map((field) => quoteIdentifier(field.alias)).join(", ")}\nFROM (\n${bare(mode.sql)}\n) AS selected_evidence`;
+    return [{ ...mode, fields, sql, parsedSql: sql }];
+  });
+  if (!selected.length) throw new Error("请至少选择一种可执行的下钻维度。");
+  if ([...metrics].some((id) => !executed.has(id)))
+    throw new Error("部分所选指标没有对应取数任务，请检查下钻维度选择。");
+  return selected;
 }
 export function validateDimension(result, item) {
   if (result.truncated) throw new Error("维度超过 500 行本地上限，不能用截断映射关联。");
@@ -431,22 +461,35 @@ export function attachItem(store, item, ability, number) {
   syncQueryGroups(store, ability);
   return ability;
 }
-export async function runAbility(store, ability, changed = () => {}) {
+export async function runAbility(store, ability, changed = () => {}, selection = null) {
   if (canEditDefinition(ability) && (!ability.key || [...ability.metrics, ...ability.dimensions].some((ref) => !ref.version && !store.items.find((item) => item.id === ref.itemId)?.key))) saveDraft(ability, store);
   syncQueryGroups(store, ability);
   const record = { id: uid("abilityrun"), startedAt: now(), status: "running", signature: abilityQuerySignature(store, ability),
     context: clone(ability.context), scenario: ability.scenario, records: [], modes: [], approvedFor: "", error: "" };
   const validation = abilityIssues(store, ability);
-  if (!validation.length) record.definition = abilityDefinition(store, ability);
+  let modes = [];
+  if (!validation.length) {
+    record.definition = abilityDefinition(store, ability);
+    try {
+      modes = abilityTrialModes(store, record.definition, selection);
+      if (selection) {
+        record.selection = clone(selection);
+        const allModes = abilityModes(store, record.definition);
+        record.partial = modes.length !== allModes.length || modes.some((mode) =>
+          mode.fields.length !== allModes.find((candidate) => candidate.id === mode.id)?.fields.length);
+        if (record.partial) record.signature = hash({ query: record.signature, selection });
+      }
+    } catch (error) { validation.push(error.message); }
+  }
+  record.modes = modes;
   ability.runs.unshift(record); changed(); await pause();
   try {
     if (validation.length) throw new Error(validation.join(" "));
-    const definition = record.definition;
     failScenario(record.scenario);
     const context = record.scenario === "empty" ? { ...record.context, libra_id: "0" } : record.context;
-    for (const mode of abilityModes(store, definition)) {
+    for (const mode of modes) {
         const entry = { id: uid("dataset"), modeId: mode.id, modeName: mode.name, snapshot: clone(mode), status: "running", context: clone(record.context), checks: [] };
-        record.records.push(entry); record.modes.push(mode); changed();
+        record.records.push(entry); changed();
         entry.checks = await verifyAssociations(mode.sourceDefinitions[0], mode.sourceDefinitions.slice(1), context);
         const result = await sqlQuery({ sql: mode.sql, bindings: mode.parameters, context });
         alterResult(result, mode, record.scenario);

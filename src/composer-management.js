@@ -1,4 +1,4 @@
-import { hash, uid, itemDefinition, abilityDefinition, sourceType, canEditDefinition, currentActor, businessGoal, resolveItem, activeGroups, outputDimensions } from "./composer-data.js";
+import { hash, uid, itemDefinition, abilityDefinition, sourceType, canEditDefinition, currentActor, businessGoal, resolveItem, activeGroups, outputDimensions, crossDimensionKeys } from "./composer-data.js";
 import { metricFields } from "./composer-metrics.js";
 
 export const sourceLabels = {
@@ -39,8 +39,8 @@ function content(definition) {
     goal: definition.goal, includeOverall: definition.includeOverall, showOverall: definition.showOverall ?? true,
     singleSqlFlow: Boolean(definition.singleSqlFlow), sqlItemId: definition.sqlItemId || "",
     crossDimensions: (definition.crossDimensions || []).map((cross) => ({
-      id: cross.id, name: cross.name, leftDimensionKey: cross.leftDimensionKey,
-      rightDimensionKey: cross.rightDimensionKey, splitSql: cross.splitSql, status: cross.status
+      id: cross.id, name: cross.name, dimensionKeys: crossDimensionKeys(cross),
+      splitSql: cross.splitSql, status: cross.status
     })),
     metrics: definition.metrics.map((r) => ({ itemId: r.itemId, version: r.version, metricKeys: r.metricKeys, definition: content(r.definition) })),
     dimensions: definition.dimensions.map((r) => ({ itemId: r.itemId, version: r.version, definition: content(r.definition) })),

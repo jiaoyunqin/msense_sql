@@ -146,6 +146,14 @@
 .c-catalog-filters .p-field { margin: 0; min-width: 125px; }
 .c-catalog-filters .p-field > span { font-size: 11px; color: var(--text-secondary); }
 .capability-panel.c-managed-capability { overflow: visible; }
+.c-managed-capability .capability-content,
+.c-managed-capability .selection-columns,
+.c-managed-capability .selection-group,
+.c-managed-capability .selection-grid { height: auto; }
+.c-managed-capability .capability-content { padding-bottom: 4px; }
+.c-managed-capability .selection-grid { max-height: 360px; }
+.c-managed-capability .selection-option:has(input:disabled) { opacity: .55; cursor: default; }
+.c-managed-capability .selection-option input:disabled + .checkbox-ui { background: var(--surface-muted); }
 .c-more-actions { position: relative; flex-shrink: 0; }
 .c-more-actions > summary { list-style: none; display: grid; place-items: center; width: 32px; height: 32px; cursor: pointer; border-radius: 6px; color: var(--text-secondary); }
 .c-more-actions > summary::-webkit-details-marker { display: none; }
@@ -631,6 +639,7 @@
 .c-cross-toolbar { display: flex; justify-content: flex-start; margin-bottom: 14px; }
 .c-cross-builder { padding: 14px; border: 1px solid var(--brand-border); border-radius: 8px; background: var(--brand-soft); }
 .c-cross-builder > div:first-child { display: grid; grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 1fr); align-items: center; gap: 12px; }
+.c-cross-builder > .c-cross-fields.has-three { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr); }
 .c-cross-builder .p-field { margin: 0; }
 .c-cross-builder > .p-actions { justify-content: flex-end; margin-top: 12px; }
 .c-cross-builder > small { display: block; margin-top: 8px; font-size: 11px; }
@@ -687,7 +696,7 @@
   .c-ai-parse-state ol { display: block; }
   .c-single-add-dimension { align-items: stretch; flex-direction: column; }
   .c-single-add-dimension .p-field { width: 100%; }
-  .c-cross-builder > div:first-child { grid-template-columns: minmax(0, 1fr); }
+  .c-cross-builder > div:first-child, .c-cross-builder > .c-cross-fields.has-three { grid-template-columns: minmax(0, 1fr); }
   .c-cross-builder > div:first-child > span { justify-self: center; }
   .c-cross-result { align-items: flex-start; flex-wrap: wrap; }
   .c-cross-result > div:first-child { flex-basis: calc(100% - 100px); }

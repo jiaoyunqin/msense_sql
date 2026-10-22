@@ -199,7 +199,7 @@
   .acts { display: flex; gap: 4px; margin-top: 6px; }
   .acts button { background: transparent; color: var(--muted); font-size: 12px; display: inline-flex; align-items: center; gap: 4px; padding: 3px 6px; border-radius: 6px; }
   .acts button:hover { background: var(--soft); color: var(--fg); }
-  .ai-in { flex: none; padding: 10px 16px 12px; background: var(--surface); }
+  .ai-in { flex: none; padding: 10px 16px calc(12px + env(safe-area-inset-bottom)); background: var(--surface); }
   .box { border: 1px solid var(--border); border-radius: 14px; padding: 8px 10px; background: var(--surface); }
   .box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgb(25 102 255 / 8%); }
   .box textarea { display: block; width: 100%; border: 0; outline: 0; resize: none; min-height: 44px; max-height: 140px; font-size: 14px; line-height: 22px; padding: 2px; background: transparent; box-shadow: none; }

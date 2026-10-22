@@ -17,6 +17,8 @@ export const canEditDefinition = (obj, actor = currentActor) => Boolean(obj && s
   && isCreator(obj, actor) && !obj.readOnly && !obj.readonly && !Object.isFrozen(obj));
 export const canViewHistory = (obj, actor = currentActor) => Boolean(obj && sourceType(obj) !== "builtin_rpc" && isCreator(obj, actor));
 export const outputDimensions = (item) => item.draft.fields.filter((f) => f.role === "dimension");
+export const MAX_CROSS_DIMENSIONS = 3;
+export const crossDimensionKeys = (cross) => [...(cross.dimensionKeys || [cross.leftDimensionKey, cross.rightDimensionKey].filter(Boolean))];
 export const directQuery = (item) => item.kind === "metric" && !hasDrillSlots(item);
 export const activeGroups = (ability) => ability.groups.filter((g) => g.enabled !== false && (!g.queryItemId || ability.metrics.some((r) => r.itemId === g.queryItemId && r.metricKeys.length)));
 export const showsOverall = (ability) => ability.showOverall ?? true;
@@ -357,6 +359,16 @@ export function abilityIssues(store, ability) {
         errors.push("存在尚未生成完成的维度拆分 SQL。");
       if ((ability.crossDimensions || []).some((cross) => cross.status !== "generated" || !cross.splitSql?.trim()))
         errors.push("存在尚未生成完成的交叉维度 SQL。");
+      const dimensionKeys = new Set(outputDimensions(source).map((field) => field.key));
+      const combinations = new Set();
+      for (const cross of ability.crossDimensions || []) {
+        const members = crossDimensionKeys(cross);
+        if (members.length < 2 || members.length > MAX_CROSS_DIMENSIONS || new Set(members).size !== members.length || members.some((key) => !dimensionKeys.has(key)))
+          errors.push("交叉维度请选择 2–3 个不同且有效的维度。");
+        const combination = [...members].sort().join("|");
+        if (combinations.has(combination)) errors.push("相同交叉维度组合已存在。");
+        combinations.add(combination);
+      }
     }
     return [...new Set(errors)];
   }
@@ -414,7 +426,7 @@ export function abilityIssues(store, ability) {
       if (owners && !ability.metrics.some((r) => r.metricKeys.length && owners.includes(r.itemId))) errors.push(`${group.name}：请保留该维度所属的内置指标组，或复制为自定义 SQL 维度。`);
     }
     if (!group.name.trim() || group.members.length !== new Set(group.members).size || group.members.some((id) => !ability.dimensions.some((d) => d.itemId === id))) errors.push(`${group.name || "下钻组"}：成员缺失、重复或尚未加入维度配置。`);
-    if (group.cross ? group.members.length < 2 || group.members.length > 4 : group.members.length !== 1) errors.push(`${group.name}：单维选择一个成员，交叉支持 2–4 个不同维度。`);
+    if (group.cross ? group.members.length < 2 || group.members.length > MAX_CROSS_DIMENSIONS : group.members.length !== 1) errors.push(`${group.name}：单维选择一个成员，交叉支持 2–3 个不同维度。`);
     for (const ref of ability.metrics.filter((r) => r.metricKeys.length)) {
       try {
         const item = resolveItem(store, ref);

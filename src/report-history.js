@@ -15,6 +15,12 @@ export function mountReportHistory({ main, shell, showToast }) {
   let report, popup, popupAnchor, fullscreenAnchor;
   let sessions = {};
   try { sessions = JSON.parse(sessionStorage.getItem(STORAGE_KEY)) || {}; } catch { /* Use in-memory sessions when storage is unavailable. */ }
+  // A reload cannot resume a frontend stream; preserve partial output as interrupted.
+  for (const saved of Object.values(sessions)) {
+    for (const turn of [...(saved.messages || []), ...Object.values(saved.inline || {}).flat()]) {
+      if (turn.role !== "user" && !turn.done) { turn.done = true; turn.stopped = true; }
+    }
+  }
   const tasks = new Map();
   const filters = { scope: "all", type: "all", time: "all", kw: "" };
   const narrow = () => window.innerWidth < 1100;
@@ -51,6 +57,7 @@ export function mountReportHistory({ main, shell, showToast }) {
   }
 
   function render(page, id) {
+    if (page === "report" && report?.id === id && !root.hidden) return;
     cancelTasks(); closePopup();
     shell.classList.remove("has-report-agent");
     root.classList.remove("detail", "expanded");
@@ -124,7 +131,7 @@ export function mountReportHistory({ main, shell, showToast }) {
     $("#aiScope").value = session().scope;
     Object.keys(session().inline).forEach(renderInline);
     renderAgent(); autoGrow();
-    $("#view").addEventListener("scroll", () => { syncToc(); closePopup(); $("#selAsk").hidden = true; }, { passive: true });
+    $("#view").addEventListener("scroll", () => { syncToc(); positionPopup(); positionSelection(); }, { passive: true });
     syncToc();
   }
 
@@ -148,7 +155,7 @@ export function mountReportHistory({ main, shell, showToast }) {
       ${suggFor(s.scope === "all" ? null : s.scope).map(q => `<button class="sugg" data-q="${esc(q)}">${ic("sparkles", 14)}${esc(q)}</button>`).join("")}</div>`;
     $("#aiQuote").innerHTML = s.quote ? `<div class="qchip">${ic("quote", 12)}<span>${esc(s.quote)}</span><button type="button" data-remove-quote aria-label="移除引用">${ic("x", 12)}</button></div>` : "";
     pane.setAttribute("aria-busy", String(tasks.has(taskKey("chat"))));
-    pane.scrollTop = pane.scrollHeight;
+    pane.scrollTop = s.messages.length ? pane.scrollHeight : 0;
     updateSend();
   }
 
@@ -233,12 +240,19 @@ export function mountReportHistory({ main, shell, showToast }) {
       ${suggFor(scope).map(q => `<button class="pop-q" data-pq="${esc(q)}">${esc(q)}</button>`).join("")}
       <form class="pop-in"><input placeholder="请输入问题" aria-label="输入模块追问" autocomplete="off"><button type="submit" disabled>提问</button></form>`;
     root.append(popup);
-    const r = button.getBoundingClientRect(), p = popup.getBoundingClientRect();
+    positionPopup();
+    button.classList.add("on"); button.setAttribute("aria-expanded", "true");
+    popup?.querySelector("input").focus({ preventScroll: true });
+  }
+
+  function positionPopup() {
+    if (!popup || !popupAnchor?.isConnected) return;
+    const r = popupAnchor.getBoundingClientRect(), p = popup.getBoundingClientRect();
+    const view = $("#view").getBoundingClientRect();
+    if (r.bottom < view.top || r.top > view.bottom) { closePopup(); return; }
     const availableBottom = narrow() ? $(".ai").getBoundingClientRect().top : window.innerHeight;
     popup.style.left = Math.max(12, Math.min(r.right - p.width, window.innerWidth - p.width - 12)) + "px";
     popup.style.top = Math.max(52, Math.min(r.bottom + 8, availableBottom - p.height - 12)) + "px";
-    button.classList.add("on"); button.setAttribute("aria-expanded", "true");
-    popup.querySelector("input").focus({ preventScroll: true });
   }
 
   function transfer(scope) {
@@ -356,7 +370,11 @@ export function mountReportHistory({ main, shell, showToast }) {
       button.setAttribute("aria-label", wide ? "恢复对话框宽度" : "加宽对话框");
     }
     if (button.id === "aiFold") setExpanded(!root.classList.contains("expanded"));
-    if ("copy" in d) navigator.clipboard?.writeText(session().messages[Number(d.copy)].md || "").then(() => showToast("已复制回答"), () => showToast("复制失败，请手动选择文本"));
+    if ("copy" in d) {
+      const text = button.closest(".answer-body")?.querySelector(".md")?.innerText || "";
+      const copying = navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject();
+      copying.then(() => showToast("已复制回答"), () => showToast("复制失败，请手动选择文本"));
+    }
     if ("regen" in d && !tasks.has(taskKey("chat"))) {
       const turn = session().messages[Number(d.regen)];
       Object.assign(turn, { md: "", done: false, stopped: false });
@@ -379,18 +397,24 @@ export function mountReportHistory({ main, shell, showToast }) {
       e.preventDefault(); send(e.target.value);
     }
   });
-  root.addEventListener("mouseup", e => {
-    if (!report || !e.target.closest("#report")) return;
+  function positionSelection() {
+    if (!report) return;
     const selection = window.getSelection(), text = selection?.toString().trim();
     const start = selection?.anchorNode?.parentElement?.closest("[data-sec]");
     const end = selection?.focusNode?.parentElement?.closest("[data-sec]");
     const button = $("#selAsk");
-    if (!text || text.length < 4 || !start || start !== end) { button.hidden = true; return; }
+    if (!text || text.length < 4 || !start || start !== end || !$("#report").contains(start)) { button.hidden = true; return; }
     const rect = selection.getRangeAt(0).getBoundingClientRect();
+    const view = $("#view").getBoundingClientRect();
+    if (rect.bottom < view.top || rect.top > view.bottom) { button.hidden = true; return; }
     button.dataset.quote = text.slice(0, 400); button.dataset.quoteScope = start.dataset.sec; button.hidden = false;
-    button.style.top = Math.max(52, rect.top - 40) + "px";
+    button.style.top = Math.max(view.top + 4, rect.top - 40) + "px";
     button.style.left = Math.max(8, Math.min(window.innerWidth - 120, rect.left)) + "px";
+  }
+  root.addEventListener("mouseup", e => {
+    if (e.target.closest("#report")) positionSelection();
   });
+  root.addEventListener("keyup", e => { if (e.shiftKey) positionSelection(); });
   root.addEventListener("mousedown", e => { if (e.target.closest("#selAsk")) e.preventDefault(); });
   root.addEventListener("click", e => {
     const button = e.target.closest("#selAsk");
