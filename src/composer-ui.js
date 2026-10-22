@@ -140,7 +140,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   function itemContext() { return item.context || defaultContext; }
   function statusBar() {
     if (item) {
-      const d = item.draft, run = itemCurrentRun(item, itemContext());
+      const d = item.draft;
       return `<div class="p-statusbar" id="composer-status">${badge(d.parsedSql === d.sql && !d.parseError ? "语法校验通过" : "SQL 待校验", d.parsedSql === d.sql && !d.parseError ? "green" : "")}${badge(item.versions.length ? `已发布 v${item.versions.at(-1).number}` : "尚未发布", "blue")}<span class="p-status-note">确认字段后保存；取数与结果校验在试跑浮层完成</span></div>`;
     }
     const run = abilityCurrentRun(store, ability);
@@ -297,7 +297,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   function abilityResults() {
     const run = ability.runs.find((r) => r.id === selectedRun) || ability.runs[0];
     if (!run) return "";
-    const valid = run?.status === "success" && run.signature === abilityQuerySignature(store, ability);
+    const valid = run?.status === "success" && run === abilityCurrentRun(store, ability);
     let modes = [];
     if (valid) { try { modes = abilityModes(store, ability); } catch { /* Keep the executed snapshot if configuration is incomplete. */ } }
     const records = (run?.records || []).map((r) => {
@@ -339,8 +339,8 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   const cellSelect = (model, value, label, options) => `<select class="c-cell-input" aria-label="${esc(label)}" data-model="${model}">${options.map(([k, name]) => `<option value="${esc(k)}" ${k === value ? "selected" : ""}>${name}</option>`).join("")}</select>`;
   function dimensionFieldsHTML() {
     const d = item.draft, values = d.enumValues || [], sample = d.parseSample?.find((f) => f.alias === d.valueAlias);
-    return `<div class="p-table-scroll"><table class="p-table c-dimension-fields"><thead><tr><th>维度名</th><th>维度 Key</th><th>维度枚举值</th><th>原生类型</th></tr></thead><tbody><tr><td>${cellInput("draft.dimensionName", d.dimensionName, "维度名")}</td><td>${cellInput("draft.dimensionKey", d.dimensionKey, "维度 Key")}<small>SQL 值列：${esc(d.valueAlias || "待选择")}</small></td><td><div class="c-enum-box">${values.map((v, i) => `<span class="c-enum-tag">${esc(v === null ? "NULL（原值）" : v)}<button type="button" data-action="remove-enum" data-index="${i}" aria-label="移除枚举 ${esc(v)}">×</button></span>`).join("")}<input aria-label="添加维度枚举" data-model="enum-input" placeholder="输入枚举，回车或逗号添加"></div><div class="c-enum-actions"><small>${d.enumEdited ? "人工候选值" : "来自解析样本"} · ${values.length} 个</small>${btn("reset-enums", "使用样本枚举", "", "link")}</div></td><td>${cellSelect("draft.valueType", d.valueType, "维度原生类型", [["string", "字符串"], ["number", "数字"], ["unknown", "待确认"]])}<small>样本：${esc(sample?.type || "unknown")}</small></td></tr></tbody></table></div>
-      <p class="c-config-hint">枚举用于定义候选值；实际结果以 SQL 原值为准。支持中英文逗号批量添加${d.sampleTruncated ? "，解析样本已截断" : ""}。</p>
+    return `<div class="p-table-scroll"><table class="p-table c-dimension-fields"><thead><tr><th>维度名</th><th>维度 Key</th><th>维度枚举值</th><th>原生类型</th></tr></thead><tbody><tr><td>${cellInput("draft.dimensionName", d.dimensionName, "维度名")}</td><td>${cellInput("draft.dimensionKey", d.dimensionKey, "维度 Key")}<small>SQL 值列：${esc(d.valueAlias || "待选择")}</small></td><td><div class="c-enum-box">${values.map((v, i) => `<span class="c-enum-tag">${esc(v === null ? "NULL（原值）" : v)}<button type="button" data-action="remove-enum" data-index="${i}" aria-label="移除枚举 ${esc(v)}">×</button></span>`).join("")}<input aria-label="添加维度枚举" data-model="enum-input" placeholder="输入枚举，回车或逗号添加"></div><div class="c-enum-actions"><small>${d.enumEdited ? "人工候选值" : "SQL 解析候选值"} · ${values.length} 个</small>${btn("reset-enums", "使用解析候选值", "", "link")}</div></td><td>${cellSelect("draft.valueType", d.valueType, "维度原生类型", [["string", "字符串"], ["number", "数字"], ["unknown", "待确认"]])}<small>静态推断：${esc(sample?.type || "unknown")}</small></td></tr></tbody></table></div>
+      <p class="c-config-hint">枚举用于定义候选值；实际取值在试跑中核对。支持中英文逗号批量添加。</p>
       ${!d.valueAlias ? issuesHTML(["检测到多个维度值候选或未找到值列，请在下方选择本取数项的一个维度值列。"]) : ""}
       <details class="c-mapping" ${!d.idAlias || !d.valueAlias ? "open" : ""}><summary>实体与列映射 <span>${esc(d.idAlias || "待选择")} → ${esc(d.valueAlias || "待选择")}</span></summary><div class="p-form-grid two">${select("统计实体", "draft.entity", [["user", "用户"], ["order", "订单"]], d.entity)}${select("实体 ID 输出列", "draft.idAlias", [["", "请选择实体 ID"], ...d.fields.map((f) => [f.alias, f.alias])], d.idAlias)}${select("维度值输出列", "draft.valueAlias", [["", "请选择维度值"], ...d.fields.filter((f) => f.alias !== d.idAlias).map((f) => [f.alias, f.alias])], d.valueAlias)}${input("取值时点 / 更新口径", "draft.timing", d.timing)}</div></details>`;
   }
@@ -406,7 +406,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   function itemResults() {
     const run = item.runs.find((r) => r.id === selectedRun) || item.runs[0];
     if (!run) return "";
-    const valid = run?.status === "success" && run.querySignature === itemCurrentRun(item, itemContext())?.querySignature && run.scenario === (item.scenario || "normal");
+    const valid = run?.status === "success" && run === itemCurrentRun(item, itemContext()) && run.scenario === (item.scenario || "normal");
     const unmatched = valid && run.distinctValues ? run.distinctValues.filter((v) => !(item.draft.enumValues || []).includes(v)) : [];
     let display = run;
     if (valid) {
@@ -444,8 +444,10 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   function openTrial(kind, id) {
     const obj = kind === "preset" ? capabilities.find((c) => c.id === id) : (kind === "item" ? store.items : store.abilities).find((o) => o.id === id);
     if (!obj) throw new Error("当前取数配置已不存在。");
+    if (trialSession) closeTrial();
     closeDialog();
-    trialSession = { kind, obj, background: { ability, item, presetId }, focus: document.activeElement, scroll: window.scrollY };
+    const focus = document.activeElement;
+    trialSession = { kind, obj, background: { ability, item, presetId }, focus, focusModel: focus?.dataset.model, focusAction: focus?.dataset.action, scroll: window.scrollY };
     trialKind = kind; item = kind === "item" ? obj : undefined; ability = kind === "ability" ? obj : undefined; presetId = kind === "preset" ? id : "";
     issues = []; selectedRun = ""; selectedRecord = "";
     trialOverlay.hidden = false; document.body.classList.add("p-modal-open");
@@ -458,11 +460,13 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     if (!trialSession) return;
     const session = trialSession;
     trialSession = undefined; trialKind = "";
+    issues = []; selectedRun = ""; selectedRecord = "";
     ({ ability, item, presetId } = session.background);
     trialOverlay.hidden = true; trialOverlay.innerHTML = ""; main.inert = false;
     if (overlay.hidden) document.body.classList.remove("p-modal-open");
     render(); window.scrollTo(0, session.scroll);
-    if (session.focus?.isConnected) session.focus.focus({ preventScroll: true });
+    const focus = session.focus?.isConnected ? session.focus : [...main.querySelectorAll("[data-model], [data-action]")].find((el) => session.focusModel ? el.dataset.model === session.focusModel : session.focusAction && el.dataset.action === session.focusAction);
+    focus?.focus({ preventScroll: true });
   }
   function trialScope() {
     const obj = item || ability || trialSession.obj, preset = trialKind === "preset" ? presetDraft() : null;
@@ -546,17 +550,6 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       "补贴金额": ["0", "240"], "核销率": ["0.6667", "0.6667"]
     };
     return modes.map((dimension) => `<div class="c-preset-result"><h3>${esc(dimension)} · 固定示例</h3><div class="p-table-scroll"><table class="p-table"><thead><tr><th>分组</th>${selection.metrics.map((m) => `<th>${esc(m)}</th>`).join("")}</tr></thead><tbody>${["对照组", "实验组"].map((group, i) => `<tr><td>${group}</td>${selection.metrics.map((m) => `<td>${esc(samples[m]?.[i] ?? "未提供示例值")}</td>`).join("")}</tr>`).join("")}</tbody></table></div></div>`).join("");
-  }
-  function renderPresetTrial() {
-    const capability = capabilities.find((c) => c.id === presetId);
-    if (!capability) { location.hash = "/capabilities"; return; }
-    const draft = presetDraft(), context = draft.context ||= clone(defaultContext);
-    outlet.innerHTML = header(`试跑取数能力“${capability.title}”`, "预置能力 · 选择指标、维度与实验上下文。", btn("preset-edit", "调整指标与维度", "square-pen"))
-      + configToolbar()
-      + section("已选证据", `${draft.metrics.length} 个指标 · ${draft.dimensions.length} 个下钻维度`, `<div class="p-row">${draft.metrics.map((m) => badge(`指标 · ${m}`, "blue")).join("")}${draft.dimensions.map((d) => badge(`维度 · ${d}`)).join("")}${!draft.metrics.length ? '<p class="p-muted">尚未选择指标，请点击“调整指标与维度”。</p>' : ""}</div>`)
-      + section("试跑上下文", "随取数配置保存，载入后可直接修改。", `<div class="p-form-grid two">${parameterCatalog.map((p) => input(p.name, `preset-context.${p.key}`, context[p.key], p.type === "date" ? 'type="date"' : "")).join("")}</div>`)
-      + section("示例结果", "固定样例，结果不随实验与日期变化。", `<div id="preset-results">${presetResultsHTML()}</div>`, btn("preset-run", "查看示例数据", "table-2", "primary", draft.metrics.length ? "" : "disabled"));
-    refreshIcons();
   }
   function renderModules() {
     const m = store.analysis, versions = store.abilities.flatMap((a) => a.versions.filter((v) => !a.archived || (m.capabilityId === a.id && m.version === v.number)).map((v) => [`${a.id}:${v.number}`, `${v.name} · v${v.number}${a.archived ? " · 已归档引用" : ""}`]));
@@ -797,7 +790,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
           if (!capability || s.metrics.some((m) => !capability.metrics.some(([name]) => name === m)) || s.dimensions.some((d) => !capability.dimensions.includes(d))) throw new Error("此配置中的内置指标或维度已不可用。");
           store.presetDrafts[s.capabilityId] = clone({ metrics: s.metrics, dimensions: s.dimensions, context: s.context });
           applyPresetSelection(s.capabilityId, store.presetDrafts[s.capabilityId], true);
-          presetResult = ""; persist(); closeDialog(); location.hash = `/trial/preset/${s.capabilityId}`; render();
+          presetResult = ""; persist(); closeDialog(); closeTrial(); openTrial("preset", s.capabilityId);
           showToast("已载入，可修改参数或另存一份配置"); return;
         }
         const loaded = instantiateConfig(store, config);
@@ -814,15 +807,6 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         store.retrievalConfigs = previous.filter((c) => c.id !== id);
         if (!persist()) { store.retrievalConfigs = previous; return; }
         openConfigLibrary(); showToast("已删除取数配置"); return;
-      }
-      if (a === "preset-run") { presetResult = presetId; renderPresetTrial(); return; }
-      if (a === "preset-edit") {
-        const id = presetId;
-        document.querySelector("#catalog-search").value = ""; catalogSource = "all"; catalogState = "all";
-        filters.querySelector('[data-model="catalog-source"]').value = "all"; filters.querySelector('[data-model="catalog-state"]').value = "all";
-        applyPresetSelection(id, presetDraft(), true);
-        location.hash = "/capabilities";
-        requestAnimationFrame(() => catalog.querySelector(`[data-capability-id="${id}"]`)?.scrollIntoView({ block: "start" })); return;
       }
       if (item && (["save", "back-owner", "parse", "accept-diff", "remove-enum", "reset-enums", "edit-field", "edit-metric", "save-field", "confirm-save-field", "insert-parameter", "sql-template", "publish-item", "confirm-publish-item"].includes(a) || a.startsWith("metric-") || a.startsWith("template-"))) assertMutable(item);
       if (ability && (["save", "confirm-picker", "remove-source", "remove-group", "add-single", "add-cross", "publish-ability", "confirm-publish-ability"].includes(a) || /^(pick-|dimension-|value-)/.test(a))) assertMutable(ability);
@@ -1079,18 +1063,10 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       }
       if (a === "analysis-context") {
         dialogKind = a;
-        openDialog(a === "ability-context" ? "运行整个取数能力" : a === "item-context" ? "独立运行 SQL 取数项" : "分析试跑上下文", contextHTML(a === "item-context" ? itemContext() : a === "ability-context" ? ability.context : store.analysis.context, a === "item-context" ? item.scenario || "normal" : a === "ability-context" ? ability.scenario : store.analysis.scenario),
-          btn("close", "取消") + btn(a === "analysis-context" ? "context-done" : "start-run", a === "analysis-context" ? "确认上下文" : "开始运行", "play", "primary")); return;
+        openDialog("分析试跑上下文", contextHTML(store.analysis.context),
+          btn("close", "取消") + btn("context-done", "确认上下文", "check", "primary")); return;
       }
       if (a === "context-done") { closeDialog(); persist(); render(); return; }
-      if (a === "start-run") {
-        if (busy) return; const kind = dialogKind, targetItem = item, targetAbility = ability; closeDialog(); busy = true; issues = []; selectedRun = ""; selectedRecord = "";
-        try {
-          const update = () => { persist(); render(); };
-          if (kind === "item-context") await runItem(targetItem, targetItem.context || defaultContext, targetItem.scenario || "normal", update);
-          else await runAbility(store, targetAbility, update);
-        } finally { busy = false; persist(); render(); } return;
-      }
       if (a === "select-run") { selectedRun = id; selectedRecord = ""; updateValidity(); return; }
       if (a === "select-record") { selectedRecord = id; updateValidity(); return; }
       if (a === "publish-item" || a === "publish-ability") {
@@ -1154,10 +1130,6 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       configSearch = value; overlay.querySelector("#saved-config-list").innerHTML = configRows(); refreshIcons(); return;
     }
     if (kind === "config-form") { configDraft[key] = value; return; }
-    if (kind === "preset-context") {
-      presetDraft().context[key] = value; presetResult = ""; persist();
-      outlet.querySelector("#preset-results").innerHTML = presetResultsHTML(); refreshIcons(); return;
-    }
     if (kind === "parameter-search") {
       parameterSearch = value; outlet.querySelector("#parameter-catalog-list").innerHTML = parameterRows(); refreshIcons(); return;
     }
