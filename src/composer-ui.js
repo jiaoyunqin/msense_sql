@@ -15,7 +15,7 @@ import {
 } from "./composer-management.js";
 import {
   parseItem, syncDimension, runItem, publishItem, itemPublishIssues, attachItem, runAbility,
-  publishAbility, abilityPublishIssues, useVersion, runAnalysis, abilityModes, abilityTrialModes, compileMode, singleSqlSplitSQL
+  publishAbility, abilityPublishIssues, abilityModes, abilityTrialModes, compileMode, singleSqlSplitSQL
 } from "./composer-engine.js";
 import { abilityProgress, itemProgress } from "./composer-progress.js";
 import { abilityCatalogActions, abilityCatalogContent } from "./composer-catalog.js";
@@ -24,8 +24,11 @@ import { createTrialHistory } from "./composer-trial-history.js";
 import { findTrialRun as ownedTrialRun, trialRuns, trialExperiment, trialRecordStatus, trialRecordTime } from "./composer-trial-records.js";
 import { trialSnapshot } from "./composer-trial-snapshot.js";
 import { createDimensionDialog } from "./composer-dimension-dialog.js";
+import { createCrossDimensionPicker } from "./composer-cross-picker.js";
 import { listAbilitySources, hasAbilityRetrievalContent, loadAbilityIntoDraft } from "./retrieval-configs.js";
 import { mountReportHistory } from "./report-history.js";
+import { createAnalysisModules } from "./analysis-modules-ui.js";
+import { attachAnalysisVersion } from "./analysis-module-data.js";
 import "./prototype.css";
 import "./composer.css";
 
@@ -87,6 +90,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     try { localStorage.setItem(COMPOSER_KEY, JSON.stringify(store)); return true; }
     catch { showToast("本地存储已满或不可用，请导出当前工作区保存。"); return false; }
   };
+  const analysisModules = createAnalysisModules({ store, outlet, main, persist, showToast, openDialog, closeDialog, render });
   const dimensionDialog = createDimensionDialog({
     shell: document.querySelector(".app-shell"), store, persist, showToast,
     canEdit: (owner) => !abilityLoadBlocked(owner),
@@ -98,6 +102,19 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       }
     }
   });
+  const crossPicker = createCrossDimensionPicker({
+    root: outlet, shell: document.querySelector(".app-shell"), limit: MAX_CROSS_DIMENSIONS,
+    onError: showToast,
+    getState: (id) => {
+      const cross = ability?.crossDimensions?.find((candidate) => candidate.id === id);
+      const source = ability?.singleSqlFlow && abilitySqlItem();
+      if (!cross || !source) return null;
+      return { selected: crossDimensionKeys(cross),
+        options: outputDimensions(source),
+        disabled: abilityLoadReadOnly(ability) || generatingCrosses.has(id) || cross.status === "generated" };
+    },
+    onChange: (id, members) => setSingleCrossMembers(id, members, false)
+  });
   for (const obj of [...store.items, ...store.abilities]) {
     obj.runs.forEach((r) => { if (r.status === "running") { r.status = "failed"; r.error = "页面重载中断了本地任务，请重新运行。"; } });
   }
@@ -108,7 +125,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   catalogActions.innerHTML = btn("new-ability", "新建取数能力", "plus", "primary");
   catalog.querySelector(".capability-count").before(catalogActions);
   const filters = document.createElement("div"); filters.className = "c-catalog-filters";
-  filters.innerHTML = select("来源", "catalog-source", [["all", "全部"], ...Object.entries(sourceLabels).map(([k, [label]]) => [k, label])], "all")
+  filters.innerHTML = select("来源", "catalog-source", [["all", "全部"], ...["builtin_rpc", "custom_sql"].map((key) => [key, sourceLabels[key][0]])], "all")
     + select("业务目标", "catalog-goal", [["all", "全部"], ...businessGoalOptions], "all")
     + select("发布状态", "catalog-state", Object.entries(stateLabels).map(([key, label]) => [key, key === "all" ? "全部" : label]), "all");
   catalog.querySelector(".catalog-toolbar").prepend(filters);
@@ -633,7 +650,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     const label = (key) => dimensions.find((field) => field.key === key)?.name || key;
     const crosses = ability.crossDimensions || [];
     const rows = crosses.map((cross, index) => {
-      const keys = crossDimensionKeys(cross);
+      const keys = crossDimensionKeys(cross).filter(Boolean);
       const combination = [...keys].sort().join("|");
       const complete = keys.length >= 2 && keys.length <= MAX_CROSS_DIMENSIONS && keys.every((key) => dimensions.some((field) => field.key === key));
       const repeated = new Set(keys.filter(Boolean)).size !== keys.filter(Boolean).length;
@@ -641,15 +658,14 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       const generating = generatingCrosses.has(cross.id);
       const valid = complete && !repeated && !duplicate && !generating;
       const attrs = `data-id="${esc(cross.id)}"`;
-      if (cross.status === "generated") return `<div class="c-cross-result" data-cross-id="${esc(cross.id)}"><div><strong>${esc(cross.name)}</strong><span>${keys.map((key) => esc(label(key))).join(" × ")}</span></div>${badge("AI 已生成", "green")}<div class="p-actions">${btn("single-cross-edit", "修改维度", "square-pen", "link", attrs)}${btn("single-view-cross-sql", "查看 / 编辑 SQL", "code-2", "link", attrs)}${btn("single-cross-delete", "", "trash-2", "link quiet-danger", `${attrs} aria-label="删除 ${esc(cross.name)}"`)}</div></div>`;
-      const options = [["", "请选择维度"], ...dimensions.map((field) => [field.key, field.name])];
-      const fields = keys.map((key, member) => `${member ? "<span>×</span>" : ""}${select(`维度 ${["A", "B", "C"][member] || member + 1}`, `single-cross.${cross.id}.${member}`, options, key, `aria-label="交叉维度 ${index + 1} 的维度 ${["A", "B", "C"][member] || member + 1}" ${generating ? "disabled" : ""}`)}`).join("");
+      const chips = (removable) => keys.map((key) => `<span class="c-cross-chip${dimensions.some((field) => field.key === key) ? "" : " invalid"}"><span>${esc(label(key))}</span>${removable ? btn("single-cross-remove", "", "x", "", `${attrs} data-key="${esc(key)}" aria-label="从组合 ${index + 1} 移除${esc(label(key))}" ${busyAttr(generating)}`) : ""}</span>`).join("");
+      if (cross.status === "generated") return `<div class="c-cross-result" data-cross-id="${esc(cross.id)}"><div><span class="c-cross-group-label">组合 ${index + 1}</span><div class="c-cross-chips" aria-label="${esc(cross.name)}">${chips(false)}</div></div>${badge("AI 已生成", "green")}<div class="p-actions">${btn("single-cross-edit", "修改维度", "square-pen", "link", attrs)}${btn("single-view-cross-sql", "查看 / 编辑 SQL", "code-2", "link", attrs)}${btn("single-cross-delete", "", "trash-2", "link quiet-danger", `${attrs} aria-label="删除 ${esc(cross.name)}"`)}</div></div>`;
       const error = repeated ? "请选择不同的维度" : duplicate ? "相同组合已存在" : cross.error || "";
-      return `<div class="c-cross-builder" data-cross-id="${esc(cross.id)}"><div class="c-cross-fields ${keys.length === 3 ? "has-three" : ""}">${fields}</div><div class="p-actions">${keys.length < MAX_CROSS_DIMENSIONS ? btn("single-cross-add-member", "添加第三个维度", "plus", "link", `${attrs} ${dimensions.length >= 3 && !generating ? "" : "disabled"}`) : keys.length === MAX_CROSS_DIMENSIONS ? btn("single-cross-remove-member", "移除第三个维度", "minus", "link", `${attrs} ${generating ? "disabled" : ""}`) : ""}${btn("single-cross-delete", "删除", "trash-2", "", `${attrs} ${generating ? "disabled" : ""}`)}${btn("single-cross-generate", generating ? "AI 正在生成…" : "生成组合 SQL", generating ? "loader-circle" : "wand-sparkles", `primary ${generating ? "is-loading" : ""}`, `${attrs} ${valid ? "" : "disabled"}`)}</div>${error ? `<small class="c-field-error" role="alert">${esc(error)}</small>` : ""}</div>`;
+      return `<div class="c-cross-builder" data-cross-id="${esc(cross.id)}"><header><span class="c-cross-group-label" id="cross-label-${esc(cross.id)}">组合 ${index + 1}</span><span>${keys.length}/${MAX_CROSS_DIMENSIONS} 个维度</span></header><div class="c-cross-builder-row"><div class="c-cross-select ${error ? "has-error" : ""}" role="group" aria-labelledby="cross-label-${esc(cross.id)}">${chips(true)}<button type="button" class="c-cross-select-button" data-action="single-cross-select" ${attrs} aria-label="选择组合 ${index + 1} 的维度" aria-haspopup="dialog" aria-expanded="false" aria-controls="cross-dimension-options" ${error ? `aria-describedby="cross-error-${esc(cross.id)}"` : ""} ${busyAttr(generating)}>${keys.length ? "" : "<span>选择 2–3 个维度</span>"}${icon("chevron-down")}</button></div><div class="p-actions">${btn("single-cross-delete", "", "trash-2", "link quiet-danger", `${attrs} aria-label="删除组合 ${index + 1}" ${busyAttr(generating)}`)}${btn("single-cross-generate", generating ? "AI 正在生成…" : "生成组合 SQL", generating ? "loader-circle" : "wand-sparkles", `primary ${generating ? "is-loading" : ""}`, `${attrs} ${valid ? "" : "disabled"}`)}</div></div>${error ? `<small class="c-field-error" id="cross-error-${esc(cross.id)}" role="alert">${esc(error)}</small>` : ""}</div>`;
     }).join("");
     return `<div class="c-cross-toolbar">${btn("single-cross-new", "新增交叉维度", "plus", "", dimensions.length >= 2 ? "" : "disabled")}</div><div class="c-cross-results">${rows || '<div class="c-dimensions-empty">尚未添加交叉维度</div>'}</div>`;
   }
-  function refreshSingleCrossDimensions(focusModel) {
+  function refreshSingleCrossDimensions(focusId, refreshPicker = true) {
     const section = outlet.querySelector("#single-cross-dimensions");
     if (!section) return;
     const content = section.querySelector(".c-cross-toolbar");
@@ -663,7 +679,24 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     }
     if (abilityLoadReadOnly(ability)) section.querySelectorAll("select, button:not([data-action='single-view-cross-sql'])").forEach((element) => { element.disabled = true; });
     refreshIcons();
-    if (focusModel) section.querySelector(`[data-model="${CSS.escape(focusModel)}"]`)?.focus({ preventScroll: true });
+    if (refreshPicker) crossPicker.refresh();
+    if (focusId) section.querySelector(`[data-action="single-cross-select"][data-id="${CSS.escape(focusId)}"]`)?.focus({ preventScroll: true });
+  }
+  function setSingleCrossMembers(id, members, refreshPicker = true) {
+    assertMutable(ability);
+    if (abilityLoadReadOnly(ability)) throw new Error("当前能力只读，不能修改维度。");
+    const cross = ability.crossDimensions.find((candidate) => candidate.id === id);
+    if (!cross || generatingCrosses.has(id)) throw new Error("当前组合不可修改。");
+    if (members.length > MAX_CROSS_DIMENSIONS || new Set(members).size !== members.length) throw new Error("最多选择 3 个不同维度。");
+    const dimensions = outputDimensions(abilitySqlItem());
+    const previous = crossDimensionKeys(cross);
+    if (members.some((key) => !dimensions.some((field) => field.key === key) && !previous.includes(key))) throw new Error("所选维度已失效，请重新选择。");
+    cross.dimensionKeys = [...members];
+    cross.status = "draft";
+    cross.splitSql = "";
+    cross.error = "";
+    persist();
+    refreshSingleCrossDimensions(undefined, refreshPicker);
   }
   function bindSingleSqlEditor() {
     const editor = outlet.querySelector("#single-sql-editor");
@@ -688,6 +721,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     });
   }
   function renderSingleSqlAbility() {
+    crossPicker.close(false);
     const source = ensureSingleSqlAbility(ability);
     if (singleContextOwner !== ability.id) {
       singleContextOwner = ability.id;
@@ -926,6 +960,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       btn("close", "取消") + btn("confirm-attach", attachDraft.mode === "new" ? "新建并保存能力组" : "保存关联并查看能力组", "check", "primary"));
   }
   function openTrial(kind, id, runId = "", mode = "", selection = null) {
+    crossPicker.close(false);
     const obj = kind === "preset" ? capabilities.find((c) => c.id === id) : (kind === "item" ? store.items : store.abilities).find((o) => o.id === id);
     if (!obj) throw new Error("当前取数配置已不存在。");
     if ((runId || ["record", "history"].includes(mode)) && !canViewHistory(obj)) throw new Error("仅创建人可以查看历史试跑记录。");
@@ -1187,24 +1222,13 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     };
     return modes.map((dimension) => `<div class="c-preset-result"><h3>${esc(dimension)} · 固定示例</h3><div class="p-table-scroll"><table class="p-table"><thead><tr><th>分组</th>${selection.metrics.map((m) => `<th>${esc(m)}</th>`).join("")}</tr></thead><tbody>${["对照组", "实验组"].map((group, i) => `<tr><td>${group}</td>${selection.metrics.map((m) => `<td>${esc(samples[m]?.[i] ?? "未提供示例值")}</td>`).join("")}</tr>`).join("")}</tbody></table></div></div>`).join("");
   }
-  function renderModules() {
-    const m = store.analysis, versions = store.abilities.flatMap((a) => a.versions.map((v) => [`${a.id}:${v.number}`, `${v.name} · v${v.number}`]));
-    const v = store.abilities.find((a) => a.id === m.capabilityId)?.versions.find((v) => v.number === m.version);
-    outlet.innerHTML = header(m.name, "引用确定的取数能力版本，选择输入并配置分析思路。", btn("save", "保存草稿", "save") + btn("analysis-context", "试跑上下文", "settings-2") + btn("analyze", "分析试跑", "flask-conical", "primary", busyAttr(busy)))
-      + issuesHTML(issues)
-      + section("分析模块信息", "", `<div class="p-form-grid two">${input("模块名称", "analysis.name", m.name)}${readonlyField("业务目标", businessGoal)}</div>${area("说明", "analysis.description", m.description)}`)
-      + section("取数能力", "显式引用固定版本；源 SQL 或能力草稿修改不影响当前分析。",
-        select("能力版本", "analysis-reference", [["", "请选择已发布能力"], ...versions], `${m.capabilityId}:${m.version}`)
-        + (v ? `<div class="p-selection-modes">${v.modes.map((mode) => `<article class="p-selection-mode"><strong>${esc(mode.name)}</strong><p>${mode.kind === "cross" ? "交叉成员" : mode.kind === "single" ? "单维下钻" : "整体"} · ${esc(mode.members.join(" × "))}</p><div class="p-checks">${mode.fields.filter((f) => f.role === "metric").map((f) => check(esc(f.name), `analysis-select.${mode.id}.${f.key}`, m.selections[mode.id]?.includes(f.key))).join("")}</div></article>`).join("")}</div>` : `<div class="p-empty">先完成取数能力试跑、核对与发布。</div>`))
-      + section("分析配置", "", area("分析思路", "analysis.reasoning", m.reasoning) + area("注意事项", "analysis.considerations", m.considerations))
-      + section("分析试跑记录", "取数成功和分析成功分别记录。", m.attempts.length ? m.attempts.map((a) => `<div class="p-version"><div><strong>${statuses[a.status]}</strong><span>${esc(a.capabilityName)} · v${a.version} · ${date(a.startedAt)}</span><small>${a.reused ? "复用相同输入快照" : "按固定版本重新取数"}</small></div><a class="p-button" href="#/analysis/${a.id}">查看输入与结论 ${icon("arrow-up-right")}</a></div>`).join("") : `<p class="p-muted">暂无分析试跑。</p>`);
-    refreshIcons();
-  }
   function renderAnalysis(id) {
+    const owner = store.modules.find((module) => module.attempts.some((attempt) => attempt.id === id));
+    if (owner) analysisModules.activate(owner.id);
     const a = store.analysis.attempts.find((a) => a.id === id);
     if (!a) { location.hash = "/modules"; return; }
     const record = a.records.find((r) => r.id === selectedRecord) || a.records[0];
-    outlet.innerHTML = header(`${a.capabilityName} · 分析试跑`, `能力 v${a.version} · ${date(a.startedAt)} · ${a.id}`, btn("back-modules", "返回分析配置", "arrow-left"), "分析模块", "#/modules")
+    outlet.innerHTML = header(`${a.capabilityName} · ${a.sourceTrial ? "取数试跑" : "分析试跑"}`, `${date(a.startedAt)} · ${a.id}`, btn("back-modules", "返回分析配置", "arrow-left"), "分析模块", `#/modules/${store.analysis.id}`)
       + `<div class="p-analysis-meta">${badge(statuses[a.status], a.status === "success" ? "green" : "amber")}${badge(`Libra ${a.snapshot.context.libra_id}`)}${badge(`${a.snapshot.context.start_date} 至 ${a.snapshot.context.end_date}`)}</div><div class="p-mode-tabs">${btn("analysis-output", "分析输出", "file-text", analysisTab === "output" ? "active" : "")}${btn("analysis-input", "输入数据与证据", "table-2", analysisTab === "input" ? "active" : "")}</div>`
       + (analysisTab === "output" ? section("分析输出", "仅描述实际输入中的组间数值。", a.status === "running" ? `<div class="p-progress"><span></span>正在检查输入并生成证据…</div>` : `<div class="p-conclusions">${a.evidence.map((e) => `<article><div>${icon("chart-no-axes-combined")}<p>${esc(e.text)}</p></div>${btn("evidence", "查看数据证据", "arrow-up-right", "link", `data-execution="${e.executionId}" data-row="${e.rowIndex}"`)}</article>`).join("")}</div><div class="p-analysis-gaps"><h3>判断边界</h3>${a.gaps.map((g) => `<p>${icon("info")}${esc(g)}</p>`).join("")}</div>`)
         : section("本次输入数据", "", `<div class="p-mode-tabs">${a.records.map((r) => btn("analysis-record", esc(r.modeName), "", r === record ? "active" : "", `data-id="${r.id}"`)).join("")}</div>${record ? table(record, highlight) + `<details class="p-snapshot"><summary>查看执行 SQL</summary><pre>${esc(record.renderedSql || "")}</pre></details>` : `<div class="p-empty">尚无可用输入。</div>`}`));
@@ -1212,6 +1236,9 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     if (highlight >= 0) outlet.querySelector(`#evidence-${highlight}`)?.scrollIntoView({ block: "center" });
   }
   function render() {
+    crossPicker.close(false);
+    main.classList.remove("am-page");
+    outlet.classList.remove("am-outlet");
     if (trialSession) { renderTrial(); return; }
     const [page, id, trialId] = location.hash.replace(/^#\/?/, "").split("/");
     if (page === "items") {
@@ -1229,7 +1256,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     catalog.hidden = reportPage || ["ability", "item", "modules", "analysis", "guide"].includes(page); outlet.hidden = reportPage || !catalog.hidden;
     reportHistory.render(page, id);
     if (ability) renderAbility(); else if (item) renderItem();
-    else if (page === "modules") renderModules(); else if (page === "analysis") renderAnalysis(id); else if (page === "guide") renderGuide(); else if (!reportPage) renderCatalog();
+    else if (page === "modules") analysisModules.render(id); else if (page === "analysis") renderAnalysis(id); else if (page === "guide") renderGuide(); else if (!reportPage) renderCatalog();
     document.querySelectorAll(".nav-item").forEach((a) => {
       const active = a.textContent.includes(reportPage ? "过往分析报告" : ["modules", "analysis"].includes(page) ? "实验分析模块" : "取数能力");
       a.classList.toggle("active", active); a.setAttribute("aria-current", active ? "page" : "false");
@@ -1500,6 +1527,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     persist(); refreshParseView();
   }
   function openDialog(title, body, footer = "", wide = false) {
+    crossPicker.close(false);
     previousFocus = document.activeElement; overlay.hidden = false; document.body.classList.add("p-modal-open");
     overlay.innerHTML = `<button class="p-overlay-backdrop" data-action="close" aria-label="关闭弹层"></button><aside class="p-drawer ${wide ? "wide" : ""}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><header><h2>${title}</h2>${btn("close", "关闭", "x", "link")}</header><div class="p-drawer-body">${body}</div><footer>${footer || btn("close", "关闭")}</footer></aside>`;
     refreshIcons(); overlay.querySelector(".p-drawer input, .p-drawer select, .p-drawer button")?.focus();
@@ -1613,6 +1641,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     const a = trigger.dataset.action, id = trigger.dataset.id;
     if (trigger.disabled) return;
     try {
+      if (a.startsWith("mod-")) { await analysisModules.handleAction(trigger); return; }
       if (a === "close") { closeDialog(); return; }
       if (a === "close-trial") { closeTrial(); return; }
       if (trialSession?.recordView && !["trial-history", "trial-record", "view-trial-record", "select-run", "select-record", "trial-current", "return-current-validation"].includes(a)) {
@@ -1791,30 +1820,36 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       if (a === "single-view-dimension-sql") { openSingleSplitSql("dimension", trigger.dataset.key); return; }
       if (a === "single-view-cross-sql") { openSingleSplitSql("cross", id); return; }
       if (a === "single-split-save") { assertMutable(ability); saveSingleSplitSql(); return; }
+      if (["single-cross-new", "single-cross-remove", "single-cross-edit", "single-cross-generate", "single-cross-delete"].includes(a)
+        && abilityLoadReadOnly(ability)) throw new Error("当前能力只读，不能修改交叉维度。");
       if (a === "single-cross-new") {
         assertMutable(ability);
         if (outputDimensions(abilitySqlItem()).length < 2) throw new Error("至少需要两个可用维度。");
-        const cross = { id: uid("cross"), name: "交叉维度", dimensionKeys: ["", ""], splitSql: "", status: "draft" };
+        const cross = { id: uid("cross"), name: "交叉维度", dimensionKeys: [], splitSql: "", status: "draft" };
         ability.crossDimensions.push(cross);
         persist();
-        refreshSingleCrossDimensions(`single-cross.${cross.id}.0`);
+        refreshSingleCrossDimensions();
+        crossPicker.open(cross.id);
         return;
       }
-      if (["single-cross-add-member", "single-cross-remove-member", "single-cross-edit"].includes(a)) {
+      if (a === "single-cross-select") { crossPicker.open(id); return; }
+      if (a === "single-cross-remove") {
+        const cross = ability.crossDimensions.find((candidate) => candidate.id === id);
+        if (!cross) return;
+        setSingleCrossMembers(id, crossDimensionKeys(cross).filter((key) => key && key !== trigger.dataset.key));
+        outlet.querySelector(`[data-action="single-cross-select"][data-id="${CSS.escape(id)}"]`)?.focus({ preventScroll: true });
+        return;
+      }
+      if (a === "single-cross-edit") {
         assertMutable(ability);
         const cross = ability.crossDimensions.find((candidate) => candidate.id === id);
         if (!cross || generatingCrosses.has(cross.id)) return;
-        const keys = crossDimensionKeys(cross);
-        if (a === "single-cross-add-member") {
-          if (keys.length >= MAX_CROSS_DIMENSIONS) throw new Error("单组交叉最多支持 3 个维度。");
-          keys.push("");
-        } else if (a === "single-cross-remove-member") keys.pop();
-        cross.dimensionKeys = keys;
         cross.status = "draft";
         cross.splitSql = "";
         cross.error = "";
         persist();
-        refreshSingleCrossDimensions(`single-cross.${cross.id}.${a === "single-cross-add-member" ? 2 : 0}`);
+        refreshSingleCrossDimensions();
+        crossPicker.open(cross.id);
         return;
       }
       if (a === "single-cross-generate") {
@@ -1829,6 +1864,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         const combination = [...keys].sort().join("|");
         if (owner.crossDimensions.some((other) => other.id !== id && [...crossDimensionKeys(other)].sort().join("|") === combination))
           throw new Error("相同交叉维度已存在。");
+        crossPicker.close(false);
         generatingCrosses.add(cross.id);
         cross.error = "";
         const sql = source.draft.sql;
@@ -1986,7 +2022,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         const modes = abilityModes(store, ability).filter((mode) => mode.id.endsWith(`__${id}`));
         openDialog("绑定 SQL", modes.length ? modes.map((mode) => `<h3>${esc(mode.name)}</h3><pre>${esc(mode.sql)}</pre>`).join("") : "<p>选择指标来源并确认输出后可查看本组 SQL。</p>", "", true); return;
       }
-      if (a === "back-modules") { location.hash = "/modules"; return; }
+      if (a === "back-modules") { location.hash = `/modules/${store.analysis.id}`; return; }
       if (a === "workflow-guide") { location.hash = "/guide"; return; }
       if (a === "back-owner") { saveDraft(item, store); syncMetricReferences(item); persist(); location.hash = `/ability/${item.ownerAbilityId}`; return; }
       if (a === "new-ability") {
@@ -2276,8 +2312,8 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       if (a === "use-ability" || a === "use-version") {
         const target = a === "use-ability" ? store.abilities.find((a) => a.id === id) : ability;
         if (!target || !abilityCatalogActions(store, target).analysis) throw new Error("请选择能力的已发布版本。");
-        useVersion(store, target, a === "use-version" ? Number(trigger.dataset.number) : target.versions.at(-1).number);
-        persist(); location.hash = "/modules"; return;
+        attachAnalysisVersion(store, target, a === "use-version" ? Number(trigger.dataset.number) : target.versions.at(-1).number);
+        persist(); location.hash = `/modules/${store.analysis.id}`; return;
       }
       if (a === "view-version") {
         const target = (trigger.dataset.type === "item" ? store.items : store.abilities).find((obj) => obj.id === (id || (item || ability)?.id));
@@ -2285,13 +2321,6 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         const v = target.versions.find((v) => v.number === Number(trigger.dataset.number));
         if (!v) throw new Error("该版本不存在。");
         openDialog(`固定版本 v${v.number}`, `<pre>${esc(JSON.stringify(v, null, 2))}</pre>`, "", true); return;
-      }
-      if (a === "analyze") {
-        if (busy) return; busy = true; issues = []; render();
-        try {
-          const attempt = await runAnalysis(store, () => { persist(); render(); });
-          selectedRecord = ""; analysisTab = "output"; location.hash = `/analysis/${attempt.id}`;
-        } finally { busy = false; persist(); render(); } return;
       }
       if (a === "analysis-output" || a === "analysis-input") { analysisTab = a === "analysis-output" ? "output" : "input"; highlight = -1; render(); return; }
       if (a === "analysis-record") { selectedRecord = id; highlight = -1; render(); return; }
@@ -2305,6 +2334,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   function handleModel(e) {
     const el = e.target, model = el.dataset.model; if (!model) return;
     if (el.disabled) return;
+    if (analysisModules.handleModel(e)) return;
     if (trialSession?.recordView) return;
     if (["catalog-metric", "catalog-dimension", "catalog-metric-search"].includes(model)) {
       if (e.type !== (model === "catalog-metric-search" ? "input" : "change")) return;
@@ -2353,19 +2383,6 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     }
     if (kind === "single-split-sql") {
       if (singleSplitSqlDraft) singleSplitSqlDraft[key] = value;
-      return;
-    }
-    if (kind === "single-cross") {
-      try { assertMutable(ability); } catch (error) { showToast(error.message); return; }
-      const cross = ability.crossDimensions.find((candidate) => candidate.id === key);
-      if (!cross || generatingCrosses.has(cross.id)) return;
-      cross.dimensionKeys = crossDimensionKeys(cross);
-      cross.dimensionKeys[Number(detail)] = value;
-      cross.status = "draft";
-      cross.splitSql = "";
-      cross.error = "";
-      persist();
-      refreshSingleCrossDimensions(el.dataset.model);
       return;
     }
     if (kind === "single-sql") {
@@ -2543,14 +2560,6 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       try { assertMutable(ability); } catch (error) { showToast(error.message); return; }
       const run = ability.runs.find((r) => r.id === selectedRun) || ability.runs[0];
       if (run === abilityCurrentRun(store, ability)) run.approvedFor = value ? abilitySignature(store, ability) : "";
-    } else if (kind === "analysis") store.analysis[key] = value;
-    else if (kind === "analysis-select") {
-      const selections = store.analysis.selections;
-      selections[key] = value ? [...new Set([...(selections[key] || []), detail])] : (selections[key] || []).filter((k) => k !== detail);
-    } else if (kind === "analysis-reference") {
-      if (!value) { store.analysis.capabilityId = ""; store.analysis.version = 0; store.analysis.selections = {}; }
-      else { const [id, n] = value.split(":"); useVersion(store, store.abilities.find((a) => a.id === id), Number(n)); }
-      persist(); render(); return;
     }
     persist(); updateValidity(!["approve-item", "approve-ability"].includes(kind));
   }
