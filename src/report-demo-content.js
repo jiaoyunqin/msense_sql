@@ -255,19 +255,17 @@ function conclHTML(sec) {
   if (!c) return '';
   if (c.none) return `<div class="ccard" data-card="${sec.id}">
       <div class="ccard-h"><span class="t">${ic('chart', 16)}分析结论未生成</span><span class="grow"></span>${askBtn(sec.id, '让 AI 解读')}</div>
-      <div class="none-tip">${ic('info', 16)}<div><b>当前尚未形成可展示的分析结论。</b>可以直接向 AI 提问，它会基于整份报告的已有内容先给出解读。</div></div>
-      <div id="inl-${sec.id}"></div></div>`;
+      <div class="none-tip">${ic('info', 16)}<div><b>当前尚未形成可展示的分析结论。</b>可以直接向 AI 提问，它会基于整份报告的已有内容先给出解读。</div></div></div>`;
   return `<div class="ccard" data-card="${sec.id}">
     <div class="ccard-h"><span class="t">${ic('chart', 16)}${esc(c.title)}</span><span class="grow"></span>${askBtn(sec.id)}</div>
-    ${c.lead ? `<p class="lead">${esc(c.lead)}</p>` : ''}${blocksHTML(c.blocks)}
-    <div id="inl-${sec.id}"></div></div>`;
+    ${c.lead ? `<p class="lead">${esc(c.lead)}</p>` : ''}${blocksHTML(c.blocks)}</div>`;
 }
 function secHTML(sec) {
   return `<section class="sec" id="sec-${sec.id}" data-sec="${sec.id}">
     <h2 class="sec-h2">${esc(sec.title)}</h2>${sec.sub ? `<p class="sec-sub">${esc(sec.sub)}</p>` : ''}
     ${conclHTML(sec)}
     ${sec.table ? `<div class="data tblock" id="tb-${sec.id}" data-tb="${sec.id}">${tableBlockHTML(sec)}</div>` : ''}
-    ${!sec.concl && sec.table ? `<div class="ccard" data-card="${sec.id}" style="margin-top:12px"><div class="ccard-h"><span class="t">${ic('sparkles', 15)}对这部分数据有疑问？</span><span class="grow"></span>${askBtn(sec.id, '向 AI 提问')}</div><div id="inl-${sec.id}"></div></div>` : ''}
+    ${!sec.concl && sec.table ? `<div class="ccard" data-card="${sec.id}" style="margin-top:12px"><div class="ccard-h"><span class="t">${ic('sparkles', 15)}对这部分数据有疑问？</span><span class="grow"></span>${askBtn(sec.id, '向 AI 提问')}</div></div>` : ''}
   </section>`;
 }
 
