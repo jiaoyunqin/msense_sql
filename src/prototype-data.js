@@ -12,8 +12,16 @@ export const parameterCatalog = [
   { key: "pgdp_experiment_id", name: "钱效实验 ID", type: "string", value: "pgdp_demo_01", description: "钱效平台的实验编号。" },
   { key: "start_date", name: "观察开始日期", type: "date", value: "2026-10-01", description: "本次观察窗口起点，YYYY-MM-DD；不是实验开始日期。" },
   { key: "end_date", name: "观察结束日期", type: "date", value: "2026-10-03", description: "本次观察窗口终点，YYYY-MM-DD；包含当日。" },
-  { key: "coupon_meta_ids", name: "券模板 ID 列表", type: "number_list", value: "101,102", description: "非空数字列表，在 SQL 中使用 IN (${coupon_meta_ids})。" },
-  { key: "versionIds", name: "实验版本 ID 列表", type: "number_list", value: "1,2", description: "对照组与实验组版本编号，使用 IN (...)。" }
+  { key: "coupon_meta_ids", name: "券批次 ID 列表", type: "number_list", value: "101,102", description: "本轮实验背景中的券批次，使用 IN (${coupon_meta_ids})。" },
+  { key: "versionIds", name: "实验版本 ID 列表", type: "number_list", value: "1,2", description: "对照组与实验组版本编号，使用 IN (...)。" },
+  { key: "experiment_start_date", name: "实验开始日期", type: "date", value: "2026-10-01", description: "实验开始日 · 当前示例实验的冻结信息。" },
+  { key: "experiment_end_date", name: "实验结束日期", type: "date", value: "2026-10-03", description: "实验结束日 · 当前示例实验的冻结信息。" },
+  { key: "observation_start_date", name: "观察开始日期", type: "date", value: "2026-10-01", contextKey: "start_date", description: "已校验的本轮观察开始日 · 已选择观察时间。" },
+  { key: "observation_end_date", name: "观察结束日期", type: "date", value: "2026-10-03", contextKey: "end_date", description: "已校验的本轮观察截止日 · 已选择观察时间。" },
+  { key: "last_has_data_date", name: "最近有数据日期", type: "date", value: "2026-10-03", description: "当前示例数据的最近可用日期。" },
+  { key: "control_version_id", name: "对照组 ID", type: "number", value: "1", description: "唯一有效对照组 · 当前示例实验对照组。" },
+  { key: "version_ids", name: "实验组 ID 列表", type: "number_list", value: "2", description: "有效实验组，不包含对照组，使用 IN (...)。" },
+  { key: "delivery_plan_ids", name: "投放计划 ID 列表", type: "number_list", value: "80001,80002", description: "冻结实验背景中的投放计划 · 当前示例实验关联计划。" }
 ];
 export const defaultContext = Object.fromEntries(parameterCatalog.map((p) => [p.key, p.value]));
 export const scenarios = {

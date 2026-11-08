@@ -108,7 +108,16 @@ const capabilities = [
     ],
     dimensions: ["实验分组"]
   }
-].map((capability) => ({ ...capability, sourceType: "builtin_rpc", goal: businessGoal }));
+].map((capability) => ({
+  ...capability, sourceType: capability.id === "coupon-count" ? "builtin_sql" : "builtin_rpc",
+  goal: businessGoal, createdBy: "msense.system",
+  updatedAt: "2026-11-05T01:00:00.000Z",
+  versions: [{ number: 1, publishedAt: "2026-11-05T01:00:00.000Z" }],
+  catalogVisible: ["experiment-config", "core-summary", "coupon-count"].includes(capability.id)
+})).map((capability) => ({
+  ...capability, dimensions: capability.dimensions.length && capability.dimensions[0] !== "实验分组"
+    ? capability.dimensions : ["整体（不拆分）"]
+}));
 
 const sidebarGroups = [
   {
@@ -253,11 +262,12 @@ app.innerHTML = `
 
 const capabilityList = document.querySelector("#capability-list");
 const catalogSelection = new Map();
-const expansion = new Map([["experiment-config", true]]);
+const expansion = new Map();
 let prototype;
 
 function renderCards() {
   capabilityList.innerHTML = capabilities
+    .filter((capability) => capability.catalogVisible)
     .map((capability) => cardTemplate(capability, expansion.get(capability.id) || false))
     .join("");
   capabilityList.querySelectorAll(".capability-panel").forEach(updatePanelSelection);
@@ -282,7 +292,7 @@ function cardTemplate(capability, expanded) {
         <span class="summary-actions">
           <span class="c-action-hint" tabindex="0" title="请先展开并选择至少一个指标" aria-label="请先展开并选择至少一个指标"><button class="outline-button run-button" type="button" disabled>
             <i data-lucide="flask-conical"></i>
-            试跑
+            试跑取数
           </button></span>
           <button class="outline-button expand-button" type="button" aria-expanded="${expanded}" aria-controls="details-${capability.id}">
             <i data-lucide="${expanded ? "chevron-up" : "chevron-down"}"></i>
@@ -336,7 +346,7 @@ function cardTemplate(capability, expanded) {
           <section class="selection-group dimension-group">
             <header class="selection-group-header">
               <div>
-                <h3>下钻维度</h3>
+              <h3>取数维度</h3>
                 <span class="dimension-count">已选 0/${capability.dimensions.length}</span>
               </div>
             </header>
@@ -348,7 +358,7 @@ function cardTemplate(capability, expanded) {
                       .map(
                         (dimension) => `
                           <label class="selection-option compact-option">
-                            <input type="checkbox" value="${dimension}" ${(catalogSelection.get(capability.id)?.dimensions || []).includes(dimension) ? "checked" : ""} />
+                            <input type="checkbox" value="${dimension}" ${(catalogSelection.get(capability.id)?.dimensions || ["整体（不拆分）"]).includes(dimension) ? "checked" : ""} />
                             <span class="checkbox-ui" aria-hidden="true"></span>
                             <span class="option-copy"><strong>${dimension}</strong></span>
                           </label>
@@ -404,7 +414,7 @@ function updatePanelSelection(panel) {
   });
   prototype?.syncPresetSelection(panel.dataset.capabilityId, catalogSelection.get(panel.dataset.capabilityId));
 
-  panel.querySelector(".selected-summary").textContent = `提供 ${totalMetrics} 个指标`;
+  panel.querySelector(".selected-summary").textContent = `提供 ${totalMetrics} 个指标 · ${totalDimensions} 个取数维度`;
   const runButton = panel.querySelector(".run-button"), hint = runButton.parentElement;
   runButton.disabled = !checkedMetrics.length;
   hint.title = checkedMetrics.length ? `试跑已选的 ${checkedMetrics.length} 个指标` : "请先展开并选择至少一个指标";

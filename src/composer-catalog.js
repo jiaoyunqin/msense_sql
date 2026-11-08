@@ -48,7 +48,13 @@ export function abilityCatalogContent(store, ability) {
     const names = mode.members.map((key) => mode.fields.find((field) => field.key === key)?.name || key);
     addDimension(mode.members, names.join(" × "), mode.description).modeIds.push(mode.id);
   }
-  return { metrics, dimensions: [...dimensions.values()], modes };
+  const overall = modes.filter((mode) => mode.kind === "overall");
+  if (overall.length) dimensions.set("overall", {
+    id: "overall", name: "整体（不拆分）",
+    description: "按实验分组汇总，不按业务维度拆分。",
+    modeIds: overall.map((mode) => mode.id)
+  });
+  return { metrics, dimensions: [...dimensions.values()].sort((a, b) => Number(b.id === "overall") - Number(a.id === "overall")), modes };
 }
 
 // Derive directory entries from existing checks; never store a second workflow state.
@@ -56,11 +62,7 @@ export function abilityCatalogActions(store, ability) {
   if (!ability) throw new Error("当前取数能力已不存在。");
   const progress = abilityProgress(store, ability);
   const readOnly = progress.readOnly;
-  const running = ability.runs.find((run) => run.status === "running");
-  const history = Boolean(running || !progress.canTrial);
-  const trial = history
-    ? progress.hasRuns && canViewHistory(ability) ? { label: "查看验证", runId: running?.id || progress.summary?.runId || "", history: true } : null
-    : { label: "试跑", runId: "", history: false };
+  const trial = { label: "试跑取数", runId: "", history: false };
   const version = ability.versions.at(-1);
   return {
     readOnly, label: "展开", trial,

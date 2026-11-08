@@ -1,9 +1,13 @@
 import { clone, uid, hash, definitions, defaultContext, parameterCatalog } from "./prototype-data.js";
 import { metricFields, metricIssues, metricQueryConfig } from "./composer-metrics.js";
 import demoFixture from "./composer-demo.json";
+import { seedSiteCapabilities } from "./capability-site-data.js";
 
 export { clone, uid, hash, defaultContext };
-export const COMPOSER_KEY = "msense-composer-v2";
+// An opt-in preview isolates demonstration edits while retaining the existing workspace.
+const demoWorkspace = typeof location !== "undefined" ? new URLSearchParams(location.search).get("demo") : "";
+export const COMPOSER_KEY = ["capabilities-20261105", "multi-experiment-20261105"].includes(demoWorkspace)
+  ? `msense-composer-${demoWorkspace}` : "msense-composer-v2";
 export const identifier = (value) => /^[a-zA-Z_]\w*$/.test(value || "");
 export const slots = ["dimension_select", "dimension_join", "dimension_group"];
 export const currentActor = "sheriqin.01";
@@ -195,6 +199,7 @@ export function loadComposer() {
     }
   } catch { /* Storage failure must not make the page unusable. */ }
   store = addPublishedDemo(store || initialStore());
+  seedSiteCapabilities(store, { newAbility, newItem, abilityDefinition, itemDefinition });
   for (const obj of [...store.items, ...store.abilities]) {
     obj.sourceType ||= obj.unavailable ? "builtin_rpc" : obj.preset ? "builtin_sql" : "custom_sql";
     delete obj.archived;
@@ -355,6 +360,14 @@ export function abilityIssues(store, ability) {
       else if (draft.parseError) errors.push("SQL 语法校验未通过，请根据编辑器提示修改后重试。");
       else if (draft.parsedSql !== draft.sql) errors.push("当前 SQL 尚未完成解析，请先校验并解析 SQL。");
       if (!metricFields(source).length) errors.push("未识别到可用指标，请检查 SQL 输出字段。");
+      errors.push(...metricIssues(source));
+      if (metricFields(source).some((field) => !field.description?.trim()))
+        errors.push("请补齐指标描述。");
+      const dims = outputDimensions(source);
+      if (new Set(dims.map((field) => field.key)).size !== dims.length)
+        errors.push("维度 Key 重复。");
+      if (dims.some((field) => !identifier(field.key) || !field.name?.trim() || !field.description?.trim()))
+        errors.push("请补齐维度名称、有效 Key 和描述。");
       if (outputDimensions(source).some((dimension) => !dimension.splitSql?.trim()))
         errors.push("存在尚未生成完成的维度拆分 SQL。");
       if ((ability.crossDimensions || []).some((cross) => cross.status !== "generated" || !cross.splitSql?.trim()))

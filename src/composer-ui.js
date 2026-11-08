@@ -1,4 +1,5 @@
 import { createIcons, icons } from "lucide";
+import { catalogPerson, catalogPeople } from "./capability-site-data.js";
 import {
   clone, uid, COMPOSER_KEY, loadComposer, newItem, newAbility, makeReference, resolveItem,
   referenceLabel, entities, itemCurrentRun, itemReviewSignature,
@@ -8,7 +9,8 @@ import {
   crossDimensionKeys, MAX_CROSS_DIMENSIONS
 } from "./composer-data.js";
 import { calculationTypes, aggregations, metricRows, metricFields, metricIssues, newMetric, syncMetrics, entityAlias, userMetricSQL } from "./composer-metrics.js";
-import { parameterCatalog, scenarios, formatValue, customAbilityExampleSQL, singleSqlMockDimensions } from "./prototype-data.js";
+import { parameterCatalog, scenarios, formatValue, customAbilityExampleSQL, hash } from "./prototype-data.js";
+import { sqlQuery } from "./prototype-engine.js";
 import {
   sourceLabels, stateLabels, matchesCatalog, catalogPublicationState, trackChanges,
   assertMutable, saveDraft, keyImpact
@@ -28,9 +30,12 @@ import { createCrossDimensionPicker } from "./composer-cross-picker.js";
 import { listAbilitySources, hasAbilityRetrievalContent, loadAbilityIntoDraft } from "./retrieval-configs.js";
 import { mountReportHistory } from "./report-history.js";
 import { createAnalysisModules } from "./analysis-modules-ui.js";
-import { attachAnalysisVersion } from "./analysis-module-data.js";
+import { createMultiExperimentUI } from "./multi-experiment-ui.js";
+import { attachAnalysisVersion, moduleConfiguration } from "./analysis-module-data.js";
+import { formatCalculatedValue } from "./analysis-module-calculation-runtime.js";
 import "./prototype.css";
 import "./composer.css";
+import "./capability-site.css";
 
 const esc = (v = "") => String(v).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const icon = (n) => `<i data-lucide="${n}"></i>`;
@@ -57,14 +62,16 @@ function syntax(sql) {
 }
 function table(record, highlight = -1) {
   if (!record?.rawRows?.length) return `<div class="p-empty">${icon("table-2")}<p>${record?.status === "empty" ? "本次执行返回 0 行，请核对筛选条件。" : "本次尚无可用数据。"}</p></div>`;
-  return `<div class="p-table-scroll"><table class="p-table"><thead><tr><th>行</th>${record.fields.map((f) => `<th>${esc(f.name)}<small>${esc(f.key)}</small></th>`).join("")}</tr></thead><tbody>${record.rawRows.map((r, i) => `<tr id="evidence-${i}" class="${i === highlight ? "evidence-row" : ""}"><td>${i + 1}</td>${record.fields.map((f) => `<td title="原值：${esc(r[f.alias] === null ? "NULL" : r[f.alias])}">${esc(formatValue(r[f.alias], f, r))}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+  return `<div class="p-table-scroll"><table class="p-table"><thead><tr><th>行</th>${record.fields.map((f) => `<th title="${esc(f.formulaText || "")}">${esc(f.name)}<small>${esc(f.calculated ? f.formulaText : f.key)}</small></th>`).join("")}</tr></thead><tbody>${record.rawRows.map((r, i) => `<tr id="evidence-${i}" class="${i === highlight ? "evidence-row" : ""}"><td>${i + 1}</td>${record.fields.map((f) => `<td title="${esc(r.calculationReasons?.[f.key] || `原值：${r[f.alias] === null ? "NULL" : r[f.alias]}`)}">${esc(f.calculated ? formatCalculatedValue(r[f.alias], f) : f.valueLabels?.[r[f.alias]] ?? formatValue(r[f.alias], f, r))}${f.calculated && r.calculationReasons?.[f.key] ? `<small class="p-calculation-reason">${esc(r.calculationReasons[f.key])}</small>` : ""}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
 }
 const section = (title, desc, body, actions = "", id = "", cls = "") => `<section class="p-section${cls ? ` ${cls}` : ""}" ${id ? `id="${id}"` : ""}><header><div><h2>${title}</h2>${desc ? `<p>${desc}</p>` : ""}</div><div class="p-actions">${actions}</div></header>${body}</section>`;
 
 export function mountComposer({ capabilities, showToast, applyPresetSelection }) {
   const store = loadComposer(), main = document.querySelector(".main-content"), catalog = document.querySelector(".capability-page");
   const outlet = document.createElement("section"); outlet.className = "prototype-outlet"; main.append(outlet);
-  const reportHistory = mountReportHistory({ main, shell: document.querySelector(".app-shell"), showToast });
+  let multiExperiments;
+  const reportHistory = mountReportHistory({ main, shell: document.querySelector(".app-shell"), showToast,
+    extensions: () => multiExperiments?.reports });
   const publicationHistory = createPublicationHistory(outlet);
   const trialHistory = createTrialHistory(outlet);
   const overlay = document.createElement("div"); overlay.className = "p-overlay"; overlay.hidden = true; document.querySelector(".app-shell").append(overlay);
@@ -72,7 +79,8 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   let trialSession;
   let ability, item, issues = [], busy = false, fieldDraft, pickerKind = "", dialogKind = "", previousFocus, selectedRecord = "", selectedRun = "", highlight = -1, analysisTab = "output", trialKind = "", attachDraft;
   let parameterOpen = false, parameterSearch = "";
-  let catalogSource = "all", catalogGoal = "all", catalogState = "all";
+  let catalogSource = "all", catalogGoal = "all", catalogState = "all", catalogCreator = "all";
+  let catalogShowLegacy = false;
   const catalogDrafts = store.catalogDrafts ||= {};
   let presetId = "", presetResult = "";
   let abilityLoadTarget, abilitySourceSearch = "", abilitySourceId = "", abilityLoadError = "", abilityLoadBusy = false;
@@ -91,6 +99,8 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     catch { showToast("本地存储已满或不可用，请导出当前工作区保存。"); return false; }
   };
   const analysisModules = createAnalysisModules({ store, outlet, main, persist, showToast, openDialog, closeDialog, render });
+  multiExperiments = createMultiExperimentUI({ store, outlet, main, persist, showToast, render, openDialog, closeDialog,
+    onReportsChanged: () => reportHistory.refreshList() });
   const dimensionDialog = createDimensionDialog({
     shell: document.querySelector(".app-shell"), store, persist, showToast,
     canEdit: (owner) => !abilityLoadBlocked(owner),
@@ -125,7 +135,9 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   catalogActions.innerHTML = btn("new-ability", "新建取数能力", "plus", "primary");
   catalog.querySelector(".capability-count").before(catalogActions);
   const filters = document.createElement("div"); filters.className = "c-catalog-filters";
-  filters.innerHTML = select("来源", "catalog-source", [["all", "全部"], ...["builtin_rpc", "custom_sql"].map((key) => [key, sourceLabels[key][0]])], "all")
+  const creators = [...new Set([...store.abilities, ...capabilities].map((obj) => obj.createdBy))];
+  filters.innerHTML = select("创建人", "catalog-creator", [["all", "全部创建人"], ...creators.map((key) => [key, catalogPeople[key] || key])], "all")
+    + select("来源", "catalog-source", [["all", "全部"], ...["builtin_rpc", "builtin_sql", "custom_sql"].map((key) => [key, sourceLabels[key][0]])], "all")
     + select("业务目标", "catalog-goal", [["all", "全部"], ...businessGoalOptions], "all")
     + select("发布状态", "catalog-state", Object.entries(stateLabels).map(([key, label]) => [key, key === "all" ? "全部" : label]), "all");
   catalog.querySelector(".catalog-toolbar").prepend(filters);
@@ -135,11 +147,13 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   }
   function moreActions(obj, type) {
     if (!canViewHistory(obj)) return "";
+    const edit = type === "ability" && canEditDefinition(obj)
+      ? btn("edit-ability", "编辑", "square-pen", "link", `data-id="${esc(obj.id)}"`) : "";
     const versions = obj.versions?.length
       ? btn("version-history-catalog", "历史版本", "layers", "link", `data-id="${esc(obj.id)}" data-type="${type}"`) : "";
     const history = type === "ability" && obj.runs?.length
       ? btn("trial-history-catalog", "历史试跑记录", "history", "link", `data-id="${esc(obj.id)}"`) : "";
-    const actions = versions + history;
+    const actions = edit + versions + history;
     if (!actions) return "";
     return `<details class="c-more-actions"><summary aria-label="${esc(obj.name)} 更多操作" aria-expanded="false">${icon("ellipsis")}</summary><div aria-label="更多操作">${actions}</div></details>`;
   }
@@ -153,16 +167,18 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     const state = catalogPublicationState(store, obj), v = obj.versions?.at(-1);
     const version = v ? badge(`已发布 v${v.number}`, "green") : obj.title ? "" : badge("仅草稿");
     const updated = obj.updatedAt || obj.savedAt || v?.publishedAt;
-    const updatedText = updated ? date(updated) : "";
+    const updatedText = updated ? new Date(updated).toLocaleDateString("zh-CN") : "";
+    const creator = catalogPerson(obj);
     return sourceBadge(obj) + version
       + (state === "changed" ? badge(`v${v.number + 1} 草稿待发布`, "amber") : "")
+      + `<span class="c-catalog-creator" title="创建人：${esc(creator)}">创建人：<span class="c-person-avatar" aria-hidden="true">${esc(creator[0])}</span>${esc(creator)}</span>`
       + (updated ? `<span class="c-catalog-updated" title="更新时间：${esc(updatedText)}">更新：${esc(updatedText)}</span>` : "");
   }
   function catalogDraft(obj, content = abilityCatalogContent(store, obj)) {
     const draft = catalogDrafts[obj.id] ||= {
       expanded: false, search: "",
-      metrics: content.metrics.filter((field) => field.available).map((field) => field.id),
-      dimensions: content.dimensions.filter((dimension) => dimension.modeIds.length).map((dimension) => dimension.id)
+      metrics: [],
+      dimensions: content.dimensions.filter((dimension) => dimension.id === "overall").map((dimension) => dimension.id)
     };
     draft.metrics = draft.metrics.filter((id) => content.metrics.some((field) => field.id === id && field.available));
     draft.dimensions = draft.dimensions.filter((id) => content.dimensions.some((dimension) => dimension.id === id && dimension.modeIds.length));
@@ -170,17 +186,18 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   }
   function catalogTrialSelection(obj, content = abilityCatalogContent(store, obj)) {
     const draft = catalogDraft(obj, content);
-    return { metrics: [...draft.metrics], modes: [...new Set([
-      ...content.modes.filter((mode) => mode.kind === "overall").map((mode) => mode.id),
-      ...content.dimensions.filter((dimension) => draft.dimensions.includes(dimension.id)).flatMap((dimension) => dimension.modeIds)
-    ])] };
+    return { metrics: [...draft.metrics], modes: [...new Set(
+      content.dimensions.filter((dimension) => draft.dimensions.includes(dimension.id)).flatMap((dimension) => dimension.modeIds)
+    )] };
   }
   function catalogTrialHint(obj, actions, content) {
     if (!actions.trial) return abilityProgress(store, obj).nextIssue || "请先完成取数配置后再试跑。";
-    if (actions.trial.history) return "";
+    if (!content.metrics.length) return "请先完成 SQL 解析与指标配置。";
+    if (!draftHasSelection(obj, content)) return "";
     try { abilityTrialModes(store, obj, catalogTrialSelection(obj, content)); return ""; }
     catch (error) { return error.message; }
   }
+  function draftHasSelection(obj, content) { return catalogDraft(obj, content).metrics.length > 0; }
   function catalogDetailsHTML(obj, content) {
     const draft = catalogDraft(obj, content);
     const option = (field, kind) => {
@@ -192,11 +209,11 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         <span class="checkbox-ui" aria-hidden="true"></span><span class="option-copy"><strong>${esc(field.name)}</strong>${description ? `<small>${esc(description)}</small>` : ""}${kind === "metric" ? `<small>Key：${esc(field.key)}</small>` : ""}</span></label>`;
     };
     return `<div class="capability-content" id="details-managed-${esc(obj.id)}" ${draft.expanded ? "" : "hidden"}>
-      <div class="capability-details">${obj.description ? `<p>${esc(obj.description)}</p>` : ""}<dl class="selection-overview"><div><dt>指标</dt><dd class="overview-value"></dd></div></dl></div>
+      <div class="capability-details">${obj.description ? `<p>${esc(obj.description)}</p>` : ""}<dl class="selection-overview"><div><dt>指标</dt><dd class="overview-value"></dd></div><div><dt>维度</dt><dd class="overview-dimensions"></dd></div></dl></div>
       <div class="selection-columns"><section class="selection-group metric-group"><header class="selection-group-header"><div><h3>指标</h3><span class="group-count"></span></div>${content.metrics.some((field) => field.available) ? `<button type="button" class="select-all-button" data-action="catalog-select-all" data-id="${esc(obj.id)}">全选</button>` : ""}</header>
         <label class="search-field metric-search">${icon("search")}<input type="search" data-model="catalog-metric-search" aria-label="搜索${esc(obj.name)}的指标" placeholder="搜索指标名称、Key 或口径" value="${esc(draft.search)}"></label>
         <div class="selection-grid">${content.metrics.map((field) => option(field, "metric")).join("") || '<p class="selection-empty">暂无指标</p>'}<p class="selection-empty c-metric-empty" hidden>没有匹配的指标</p></div></section>
-      <section class="selection-group dimension-group"><header class="selection-group-header"><div><h3>下钻维度</h3><span class="dimension-count"></span></div></header>
+      <section class="selection-group dimension-group"><header class="selection-group-header"><div><h3>取数维度</h3><span class="dimension-count"></span></div><button type="button" class="select-all-button" data-action="catalog-overall-only" data-id="${esc(obj.id)}">仅保留整体</button></header>
         <div class="selection-grid dimension-grid">${content.dimensions.map((dimension) => option(dimension, "dimension")).join("") || '<p class="selection-empty">暂无下钻维度</p>'}</div></section></div></div>`;
   }
   function refreshCatalogPanel(panel, obj, content = abilityCatalogContent(store, obj)) {
@@ -204,10 +221,11 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     panel.querySelector(".group-count").textContent = `已选 ${draft.metrics.length}/${content.metrics.length}`;
     panel.querySelector(".dimension-count").textContent = `已选 ${draft.dimensions.length}/${content.dimensions.length}`;
     panel.querySelector(".overview-value").textContent = content.metrics.filter((field) => draft.metrics.includes(field.id)).map((field) => field.name).join("、") || "暂未选择指标";
+    panel.querySelector(".overview-dimensions").textContent = content.dimensions.filter((field) => draft.dimensions.includes(field.id)).map((field) => field.name).join("、") || "暂未选择维度";
     const selectAll = panel.querySelector(".select-all-button");
     if (selectAll) selectAll.textContent = content.metrics.filter((field) => field.available).every((field) => draft.metrics.includes(field.id)) ? "取消全选" : "全选";
     const trial = panel.querySelector('[data-action="run-catalog"]'), hint = catalogTrialHint(obj, actions, content);
-    trial.disabled = Boolean(hint); trial.parentElement.title = hint || (actions.trial.history ? "查看已有验证记录" : `试跑已选的 ${draft.metrics.length} 个指标`);
+    trial.disabled = Boolean(hint); trial.parentElement.title = hint || (draft.metrics.length ? `试跑已选的 ${draft.metrics.length} 个指标` : "进入工作区选择试跑指标和维度");
     trial.parentElement.setAttribute("aria-label", trial.parentElement.title);
     if (hint) trial.parentElement.setAttribute("tabindex", "0"); else trial.parentElement.removeAttribute("tabindex");
     const query = draft.search.trim().toLocaleLowerCase("zh-CN");
@@ -216,7 +234,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     panel.querySelector(".c-metric-empty").hidden = !options.length || options.some((option) => !option.hidden);
   }
   function renderCatalog() {
-    const filters = { search: document.querySelector("#catalog-search").value, source: catalogSource, goal: catalogGoal, state: catalogState };
+    const filters = { search: document.querySelector("#catalog-search").value, source: catalogSource, goal: catalogGoal, state: catalogState, creator: catalogCreator };
     const list = catalog.querySelector("#capability-list");
     list.querySelectorAll(".c-managed-capability").forEach((el) => el.remove());
     list.querySelectorAll("[data-capability-id]").forEach((el) => {
@@ -224,8 +242,8 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       el.hidden = !matchesCatalog(store, obj, filters);
       el.querySelector(".c-catalog-meta").innerHTML = catalogMetadata(obj);
     });
-    const rows = store.abilities.filter((a) => matchesCatalog(store, a, filters))
-    .sort((a, b) => Number(Boolean(b.demo)) - Number(Boolean(a.demo))).map((a) => {
+    const rows = store.abilities.filter((a) => (catalogShowLegacy || a.siteDemo || a.siteWorkspace) && matchesCatalog(store, a, filters))
+    .sort((a, b) => Number(Boolean(b.siteDemo)) - Number(Boolean(a.siteDemo))).map((a) => {
       const actions = abilityCatalogActions(store, a);
       const content = abilityCatalogContent(store, a), draft = catalogDraft(a, content);
       const metricCount = content.metrics.length;
@@ -234,8 +252,8 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         actions.trial.history ? "查看已有验证记录，获取数据仍需通过配置检查" : "试跑当前配置",
         `data-run-id="${esc(actions.trial.runId)}"`) : action("run-catalog", "试跑", "flask-conical", "", "disabled");
       const primary = `<button type="button" class="outline-button expand-button" data-action="catalog-expand" data-id="${esc(a.id)}" aria-expanded="${draft.expanded}" aria-controls="details-managed-${esc(a.id)}">${icon(draft.expanded ? "chevron-up" : "chevron-down")}<span>${draft.expanded ? "收起" : "展开"}</span></button>`;
-      const edit = actions.edit ? action("edit-ability", "编辑", "square-pen") : "";
-      return `<article class="capability-panel c-managed-capability ${draft.expanded ? "expanded" : ""}" data-managed-id="${esc(a.id)}"><header class="capability-summary"><div class="c-catalog-heading"><button type="button" class="summary-button" data-action="catalog-expand" data-id="${esc(a.id)}" aria-expanded="${draft.expanded}" aria-controls="details-managed-${esc(a.id)}" title="${esc(a.name)}"><span class="capability-type">取数能力</span><strong>${esc(a.name)}</strong><span class="selected-summary">已配置 ${metricCount} 个指标</span></button><div class="c-catalog-meta" aria-label="来源、版本和更新时间">${catalogMetadata(a)}</div></div><div class="summary-actions"><span class="c-action-hint">${trial}</span>${primary}${edit}${moreActions(a, "ability")}</div></header>${catalogDetailsHTML(a, content)}</article>`;
+      const view = action("view-ability", "查看", "eye");
+      return `<article class="capability-panel c-managed-capability ${draft.expanded ? "expanded" : ""}" data-managed-id="${esc(a.id)}"><header class="capability-summary"><div class="c-catalog-heading"><button type="button" class="summary-button" data-action="catalog-expand" data-id="${esc(a.id)}" aria-expanded="${draft.expanded}" aria-controls="details-managed-${esc(a.id)}" title="${esc(a.name)}"><span class="capability-type">取数能力</span><strong>${esc(a.name)}</strong><span class="selected-summary">提供 ${metricCount} 个指标 · ${content.dimensions.length} 个取数维度</span></button><div class="c-catalog-meta" aria-label="来源、版本、创建人和更新时间">${catalogMetadata(a)}</div></div><div class="summary-actions"><span class="c-action-hint">${trial}</span>${primary}${view}${moreActions(a, "ability")}</div></header>${catalogDetailsHTML(a, content)}</article>`;
     }).join("");
     list.insertAdjacentHTML("afterbegin", rows);
     list.querySelectorAll("[data-managed-id]").forEach((panel) => refreshCatalogPanel(panel, store.abilities.find((obj) => obj.id === panel.dataset.managedId)));
@@ -484,12 +502,8 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     picker.innerHTML = valuePickerHTML();
     overlay.querySelector('[data-action="value-apply"]').disabled = !valueDraft.all && !valueDraft.selected.length;
   }
-  const singleContextParams = [
-    { key: "libra_id", label: "实验 ID", sample: "4823214", description: "试跑时替换为当前实验 ID" },
-    { key: "pgdp_experiment_id", label: "实验平台 ID", sample: "pgdp_demo_01", description: "试跑时替换为当前实验平台 ID" },
-    { key: "start_date", label: "开始时间", sample: "2026-10-01", description: "试跑时替换为观测开始日期" },
-    { key: "end_date", label: "结束时间", sample: "2026-10-03", description: "试跑时替换为观测结束日期" }
-  ];
+  const singleContextParams = parameterCatalog.filter((p) => !["start_date", "end_date", "versionIds"].includes(p.key))
+    .map((p) => ({ key: p.key, label: p.name, sample: p.value, description: p.description }));
   function abilitySqlItem(target = ability) {
     return store.items.find((candidate) => candidate.id === target?.sqlItemId)
       || store.items.find((candidate) => target?.metrics?.some((reference) => reference.itemId === candidate.id) && candidate.kind === "metric");
@@ -543,10 +557,9 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     }];
     const parsed = source.draft.sql && source.draft.parsedSql === source.draft.sql
       && !source.draft.parseError && source.draft.fields.length;
-    const addedMockDimensions = parsed && ensureSingleSqlMockDimensions(source);
-    if (parsed && (addedMockDimensions || outputDimensions(source).some((field) => !field.splitSql))) {
+    if (parsed && canEditDefinition(target) && outputDimensions(source).some((field) => !field.splitSql)) {
       applySingleSqlAiResult(source);
-      if (addedMockDimensions) persist();
+      persist();
     }
     if (target.parseStatus !== "parsing") {
       target.parseStatus = source.draft.parseError ? "failed"
@@ -622,7 +635,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   }
   function singleParseActionsHTML(source) {
     const pending = parsing.has(source.id) || ability.parseStatus === "parsing";
-    return `<div class="c-single-sql-actions">${btn("single-example", "使用示例 SQL", "file-code", "", busyAttr(pending))}${btn("single-parse", pending ? "AI 解析中…" : "校验并解析 SQL", pending ? "loader-circle" : "wand-sparkles", `primary ${pending ? "is-loading" : ""}`, busyAttr(pending))}</div>${singleParseStatusHTML(source)}`;
+    return `<div class="c-single-sql-actions">${btn("single-example", "使用示例 SQL", "file-code", "", busyAttr(pending))}<div class="p-actions">${btn("single-validate", "校验 SQL", "check", "", busyAttr(pending))}${btn("single-parse", pending ? "AI 解析中…" : "校验并解析 SQL", pending ? "loader-circle" : "wand-sparkles", `primary ${pending ? "is-loading" : ""}`, busyAttr(pending))}</div></div>${source.draft.validationMessage ? `<p class="c-sql-validation" role="status">${esc(source.draft.validationMessage)}</p>` : ""}${singleParseStatusHTML(source)}`;
   }
   function singleEditorHTML(source) {
     const sql = source.draft.sql;
@@ -633,17 +646,19 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     syncMetrics(source);
     const rows = metricRows(source);
     const numeric = source.draft.fields.filter((field) => field.type === "number" && !["group_id", "group_name", "is_control", "experiment_id"].includes(field.alias));
-    const body = rows.map((row, index) => `<tr><td>${cellInput(`single-metric.${index}.name`, row.name, `指标 ${index + 1} 名称`)}</td><td>${cellSelect(`single-metric.${index}.calculation`, "value", `${row.name} 指标类型`, [["value", "SQL 原值"]])}</td><td>${cellSelect(`single-metric.${index}.valueAlias`, row.valueAlias, `${row.name} SQL 字段`, numeric.map((field) => [field.alias, field.alias]))}</td><td>${cellArea(`single-metric.${index}.description`, row.description || "", `${row.name} 指标描述`)}</td><td><div class="c-metric-row-actions">${btn("single-metric-up", "", "arrow-up", "link", `data-index="${index}" aria-label="上移 ${esc(row.name)}" ${index ? "" : "disabled"}`)}${btn("single-metric-down", "", "arrow-down", "link", `data-index="${index}" aria-label="下移 ${esc(row.name)}" ${index < rows.length - 1 ? "" : "disabled"}`)}${btn("single-metric-copy", "", "copy", "link", `data-index="${index}" aria-label="复制 ${esc(row.name)}"`)}${btn("single-metric-delete", "", "trash-2", "link quiet-danger", `data-index="${index}" aria-label="删除 ${esc(row.name)}"`)}</div></td></tr>`).join("");
-    return `<div class="c-output-summary"><span>AI 已识别 ${rows.length} 个指标</span>${badge("可人工修改", "blue")}</div><div class="p-table-scroll"><table class="p-table c-single-metrics"><thead><tr><th>指标名</th><th>指标类型</th><th>SQL 字段 / 表达式</th><th>指标描述</th><th>操作</th></tr></thead><tbody>${body || '<tr><td colspan="5" class="c-metric-empty">未识别到可用指标，请检查 SQL 输出字段。</td></tr>'}</tbody></table></div>${btn("single-metric-add", "添加指标", "plus", "c-add-metric", numeric.length ? "" : "disabled")}`;
+    const readonly = abilityLoadReadOnly(ability);
+    const body = rows.map((row, index) => `<tr><td>${cellInput(`single-metric.${index}.name`, row.name, `指标 ${index + 1} 名称`)}</td><td>${cellSelect(`single-metric.${index}.calculation`, "value", `${row.name} 指标类型`, [["value", "SQL 原值"]])}${cellSelect(`single-metric.${index}.format`, row.format, `${row.name} 展示格式`, [["decimal", "小数"], ["integer", "整数"], ["currency", "金额"], ["percent", "百分比"]])}</td><td>${cellSelect(`single-metric.${index}.valueAlias`, row.valueAlias, `${row.name} SQL 字段`, numeric.map((field) => [field.alias, field.alias]))}</td><td><span class="c-native-type">${row.type === "string" ? "string" : row.format === "integer" ? "bigint" : "double"}</span></td><td>${cellArea(`single-metric.${index}.description`, row.description || "", `${row.name} 指标描述`)}</td><td><div class="c-metric-row-actions">${readonly ? btn("single-inspect-metric", "查看", "eye", "link", `data-index="${index}"`) : `${btn("single-metric-up", "", "arrow-up", "link", `data-index="${index}" aria-label="上移 ${esc(row.name)}" ${index ? "" : "disabled"}`)}${btn("single-metric-down", "", "arrow-down", "link", `data-index="${index}" aria-label="下移 ${esc(row.name)}" ${index < rows.length - 1 ? "" : "disabled"}`)}${btn("single-metric-copy", "", "copy", "link", `data-index="${index}" aria-label="复制 ${esc(row.name)}"`)}${btn("single-metric-delete", "", "trash-2", "link quiet-danger", `data-index="${index}" aria-label="删除 ${esc(row.name)}"`)}`}</div></td></tr>`).join("");
+    return `<div class="c-output-summary"><span>已配置 ${rows.length} 个指标</span>${badge(readonly ? "只读查看" : "可人工修改", "blue")}</div><div class="p-table-scroll"><table class="p-table c-single-metrics"><thead><tr><th>指标名</th><th>指标类型</th><th>SQL 字段 / 表达式</th><th>数据类型</th><th>指标描述</th><th>操作</th></tr></thead><tbody>${body || '<tr><td colspan="6" class="c-metric-empty">未识别到可用指标，请检查 SQL 输出字段。</td></tr>'}</tbody></table></div>${readonly ? "" : btn("single-metric-add", "添加指标", "plus", "c-add-metric", numeric.length ? "" : "disabled")}`;
   }
   function singleDimensionsHTML(source) {
     const dimensions = outputDimensions(source);
     const candidates = source.draft.fields.filter((field) => !["identity", "dimension"].includes(field.role) && field.type === "string");
     const body = dimensions.map((field) => {
       const index = source.draft.fields.indexOf(field);
-      return `<tr><td>${cellInput(`single-dimension.${index}.name`, field.name, `${field.alias} 维度名`)}</td><td>${cellInput(`single-dimension.${index}.key`, field.key, `${field.alias} 维度 Key`)}</td><td>${cellArea(`single-dimension.${index}.description`, field.description || "", `${field.alias} 维度描述`)}</td><td><div class="c-split-sql-cell">${badge(field.splitSql ? "AI 已生成" : "待生成", field.splitSql ? "green" : "amber")}${btn("single-view-dimension-sql", "查看 SQL", "code-2", "link", `data-key="${esc(field.key)}"`)}</div></td><td>${btn("single-dimension-delete", "", "trash-2", "link quiet-danger", `data-key="${esc(field.key)}" aria-label="删除 ${esc(field.name)}"`)}</td></tr>`;
+      return `<tr><td>${cellInput(`single-dimension.${index}.name`, field.name, `${field.alias} 维度名`)}</td><td>${cellInput(`single-dimension.${index}.key`, field.key, `${field.alias} 维度 Key`)}</td><td><span class="c-native-type">${esc(field.type)}</span></td><td>${cellArea(`single-dimension.${index}.description`, field.description || "", `${field.alias} 维度描述`)}</td><td><div class="c-split-sql-cell">${badge(field.splitSql ? "已配置" : "待生成", field.splitSql ? "green" : "amber")}${btn("single-view-dimension-sql", "查看 SQL", "code-2", "link", `data-key="${esc(field.key)}"`)}</div></td><td>${abilityLoadReadOnly(ability) ? "" : btn("single-dimension-delete", "", "trash-2", "link quiet-danger", `data-key="${esc(field.key)}" aria-label="删除 ${esc(field.name)}"`)}</td></tr>`;
     }).join("");
-    return `<div class="c-output-summary"><span>AI 已识别 ${dimensions.length} 个维度</span>${badge("拆分 SQL 可编辑", "blue")}</div><div class="p-table-scroll"><table class="p-table c-single-dimensions"><thead><tr><th>维度名</th><th>维度 Key</th><th>维度描述</th><th>拆分 SQL</th><th>操作</th></tr></thead><tbody>${body || '<tr><td colspan="5" class="c-metric-empty">未识别到可用维度，请确认 SQL 中是否包含维度字段。</td></tr>'}</tbody></table></div>${candidates.length ? `<div class="c-single-add-dimension">${select("添加输出字段为维度", "single-dimension-candidate", [["", "选择 SQL 输出字段"], ...candidates.map((field) => [field.alias, field.alias])], singleDimensionCandidate)}${btn("single-dimension-add", "添加维度", "plus", "", singleDimensionCandidate ? "" : "disabled")}</div>` : ""}`;
+    const overall = `<tr class="c-overall-row"><td><strong>整体（不拆分）</strong></td><td><small>无需维度字段</small></td><td>—</td><td>按实验分组汇总，不按业务维度拆分。</td><td>${badge("已配置", "green")}</td><td>${btn("single-view-overall-sql", "查看", "eye", "link")}</td></tr>`;
+    return `<div class="c-output-summary"><span>整体 + ${dimensions.length} 个拆分维度</span>${badge(abilityLoadReadOnly(ability) ? "只读查看" : "取数 SQL 可编辑", "blue")}</div><div class="p-table-scroll"><table class="p-table c-single-dimensions"><thead><tr><th>维度名</th><th>维度 Key</th><th>数据类型</th><th>维度描述</th><th>取数 SQL</th><th>操作</th></tr></thead><tbody>${overall}${body}</tbody></table></div>${candidates.length ? `<div class="c-single-add-dimension">${select("添加输出字段为维度", "single-dimension-candidate", [["", "选择 SQL 输出字段"], ...candidates.map((field) => [field.alias, field.alias])], singleDimensionCandidate)}${btn("single-dimension-add", "添加维度", "plus", "", singleDimensionCandidate ? "" : "disabled")}</div>` : ""}`;
   }
   function singleCrossDimensionsHTML(source) {
     const dimensions = outputDimensions(source);
@@ -730,16 +745,16 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     const readonly = abilityLoadReadOnly(ability);
     const parsed = Boolean(source.draft.sql && source.draft.parsedSql === source.draft.sql && !source.draft.parseError);
     const isNew = !ability.savedAt && !ability.versions.length;
-    const panelTitle = isNew ? "新建自定义 SQL 取数能力" : "编辑自定义 SQL 取数能力";
+    const panelTitle = isNew ? "新建自定义 SQL 取数能力" : readonly ? "查看自定义 SQL 取数能力" : "编辑自定义 SQL 取数能力";
     const status = parsing.has(source.id) ? badge("解析中", "blue") : ability.parseStatus === "failed" ? badge("解析失败", "amber")
       : ability.versions.length ? badge(`已发布 v${ability.versions.at(-1).number}`, "green") : badge("草稿");
     const identity = ability.savedAt && ability.key
       ? `<div class="c-single-ability-id"><span>能力 ID：<code>${esc(ability.key)}</code></span>${btn("single-copy-id", "", "copy", "link", 'title="复制能力 ID" aria-label="复制能力 ID"')}</div>` : "";
-    const headerActions = readonly && canEditDefinition(ability)
-      ? status + btn("edit-ability", "编辑", "square-pen", "", `data-id="${esc(ability.id)}"`)
-      : status;
+    const headerActions = (parsed ? btn("run-catalog", "试跑", "flask-conical", "primary", `data-id="${esc(ability.id)}"`) : "")
+      + (canViewHistory(ability) && ability.runs.length ? btn("trial-history-catalog", "试跑记录", "history", "", `data-id="${esc(ability.id)}"`) : "")
+      + status + (readonly && canEditDefinition(ability) ? btn("edit-ability", "编辑", "square-pen", "", `data-id="${esc(ability.id)}"`) : "");
     outlet.innerHTML = `<div class="c-single-sql-page">${header(panelTitle, "通过一整套完整 SQL 定义取数指标和维度，系统将自动解析并生成可编辑配置。", headerActions)}
-      ${identity}${issuesHTML(issues)}
+      ${identity}${readonly ? `<p class="c-readonly-note">${icon("eye")}只读查看${canEditDefinition(ability) ? "；点击编辑后修改当前草稿。" : "；仅创建人可修改自定义 SQL 能力。"}</p>` : ""}${issuesHTML(issues)}
       ${section("基础信息", "", `<div class="c-single-basic">${singleBasicField("名称", "name", ability.name, 50)}${singleBasicField("业务目标", "goal", ability.goal)}${singleBasicField("说明", "description", ability.description, 200, true)}</div>`)}
       ${section("可引用上下文", "搜索上下文名称或 Key，点击插入 SQL。试跑时自动替换为当前实验信息。", singleContextHTML(), "", "single-context-section")}
       ${section("自定义 SQL", "请输入一整套完整取数 SQL。系统会解析其中输出的指标和维度，并生成可人工修改的指标配置、维度配置及拆分 SQL。", singleEditorHTML(source))}
@@ -749,12 +764,12 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         ${section("交叉维度", "每组选择 2–3 个维度，可新增多组并分别生成组合 SQL。", singleCrossDimensionsHTML(source), "", "single-cross-dimensions")}
       </div>
       <div id="composer-publication-history" data-history-revision="${esc(historyRevision(ability, "ability"))}">${publicationHistory.render(ability, "ability", versionsHTML(ability, "ability"))}</div>
-      <footer class="c-single-sticky-actions"><div>${isNew && !readonly ? btn("single-example", "恢复示例", "rotate-ccw", "link") : ""}</div><div class="p-actions">${btn("single-cancel", "取消")}${readonly ? (canEditDefinition(ability) ? btn("edit-ability", "编辑", "square-pen", "primary", `data-id="${esc(ability.id)}"`) : "") : `${btn("single-save", "保存草稿", "save")}${btn("single-publish", "校验并发布", "upload", "primary", busyAttr(parsing.has(source.id)))}`}</div></footer>
+      <footer class="c-single-sticky-actions"><div>${isNew && !readonly ? btn("single-example", "恢复示例", "rotate-ccw", "link") : ""}</div><div class="p-actions">${btn("single-cancel", readonly ? "返回" : "取消")}${readonly ? (canEditDefinition(ability) ? btn("edit-ability", "编辑", "square-pen", "primary", `data-id="${esc(ability.id)}"`) : "") : `${btn("single-save", "保存草稿", "save")}${btn("single-publish", busy ? "正在校验…" : "校验并发布", "upload", "primary", busyAttr(parsing.has(source.id) || busy))}`}</div></footer>
     </div>`;
     if (readonly) {
       outlet.querySelectorAll('.c-single-sql-page [data-model]:not([data-model="single-context-search"])').forEach((element) => { element.disabled = true; });
       outlet.querySelectorAll('.c-single-sql-page [data-action^="single-"]').forEach((element) => {
-        if (!["single-cancel", "single-copy-id", "single-copy-context", "single-context-clear", "single-copy-sql", "single-view-dimension-sql", "single-view-cross-sql"].includes(element.dataset.action)) element.disabled = true;
+        if (!["single-cancel", "single-copy-id", "single-copy-context", "single-context-clear", "single-copy-sql", "single-view-dimension-sql", "single-view-cross-sql", "single-view-overall-sql", "single-inspect-metric"].includes(element.dataset.action)) element.disabled = true;
       });
     }
     bindSingleSqlEditor();
@@ -982,6 +997,13 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       background: { ability, item, presetId, selectedRun, selectedRecord, issues }, hash: location.hash,
       focus, focusModel: focus?.dataset.model, focusAction: focus?.dataset.action,
       focusId: focus?.dataset.id, focusRunId: focus?.dataset.runId, scroll: window.scrollY };
+    if (kind === "ability" && !recordView && !selection) {
+      const content = abilityCatalogContent(store, obj);
+      trialSession.selection = {
+        metrics: content.metrics.filter((field) => field.available).map((field) => field.id),
+        modes: content.modes.filter((entry) => entry.kind === "overall").map((entry) => entry.id)
+      };
+    }
     trialKind = kind; item = kind === "item" ? obj : undefined; ability = kind === "ability" ? obj : undefined; presetId = kind === "preset" ? id : "";
     issues = []; selectedRun = obj.runs?.some((run) => run.id === runId) ? runId : ""; selectedRecord = "";
     if (kind === "preset") presetResult = "";
@@ -1044,6 +1066,11 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   }
   function currentTrialRun() {
     return ownedTrialRun(trialSession?.obj, trialSession?.runId);
+  }
+  function trialFieldPickerHTML() {
+    if (trialKind !== "ability") return "";
+    const content = abilityCatalogContent(store, ability), selection = trialSession.selection;
+    return `<section class="c-trial-fields"><header><h2>试跑字段</h2><p>选择本次试跑的指标与取数维度，整体可与下钻维度同时选择。</p></header><div class="selection-columns"><section><header class="selection-group-header"><div><h3>指标</h3><span>已选 ${selection.metrics.length}/${content.metrics.length}</span></div>${btn("trial-metric-all", selection.metrics.length === content.metrics.length ? "清空" : "全选", "", "link", busyAttr(busy))}</header><div class="c-trial-field-options">${content.metrics.map((field) => check(`<strong>${esc(field.name)}</strong><small>${esc(field.description || "")}</small>`, "trial-field-metric", selection.metrics.includes(field.id), `value="${esc(field.id)}" ${busyAttr(busy)}`)).join("")}</div></section><section><header class="selection-group-header"><div><h3>取数维度</h3><span>已选 ${content.dimensions.filter((field) => field.modeIds.some((id) => selection.modes.includes(id))).length}/${content.dimensions.length}</span></div>${btn("trial-overall-only", "仅保留整体", "", "link", busyAttr(busy))}</header><div class="c-trial-field-options">${content.dimensions.map((field) => check(`<strong>${esc(field.name)}</strong><small>${esc(field.description || "")}</small>`, "trial-field-dimension", field.modeIds.some((id) => selection.modes.includes(id)), `value="${esc(field.id)}" ${busyAttr(busy)} ${field.modeIds.length ? "" : "disabled"}`)).join("")}</div></section></div></section>`;
   }
   function trialHistoryRows(obj, kind) {
     if (!canViewHistory(obj)) return "";
@@ -1186,7 +1213,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     const model = active?.dataset.model, action = active?.dataset.action;
     const advancedOpen = body.querySelector(".c-trial-advanced")?.open ?? trialSession.currentValidation?.advancedOpen ?? false;
     body.innerHTML = `<header class="c-trial-header"><div><span class="c-trial-eyebrow">取数能力 · 取数验证</span><h1>试跑${item ? " SQL 取数项" : "取数能力"}“${esc(obj.name || obj.title)}”</h1><div class="p-row">${badge(ability?.goal || (preset ? businessGoal : "独立 SQL"), "blue")}${badge(`${metrics.length} 个指标`, "blue")}${badge(`${dimensions.length} 个下钻维度`, "blue")}${busy ? badge("任务运行中", "blue") : ""}</div></div>${preset || !canViewHistory(obj) || !obj.runs.length ? "" : btn("trial-history", `历史试跑记录（${obj.runs.length}）`, "history")}${badge(item ? "仅执行当前 SQL 取数项" : "仅执行当前取数能力", "blue")}${btn("close-trial", "", "x", "link", 'aria-label="关闭取数验证"')}</header>
-      <div class="c-trial-content"><div class="c-trial-evidence"><span>已选证据</span><strong>${metrics.length} 个指标</strong><strong>${dimensions.length} 个下钻维度</strong><div>${metrics.map((f) => badge(`指标 · ${f.name}`)).join("")}${dimensions.map((d) => badge(`下钻 · ${d.name}`)).join("")}</div></div>
+      <div class="c-trial-content">${trialFieldPickerHTML()}<div class="c-trial-evidence"><span>已选证据</span><strong>${metrics.length} 个指标</strong><strong>${dimensions.length} 个下钻维度</strong><div>${metrics.map((f) => badge(`指标 · ${f.name}`)).join("")}${dimensions.map((d) => badge(`下钻 · ${d.name}`)).join("")}</div></div>
       <section class="c-trial-context"><header>${icon("flask-conical")}<strong>输入实验 ID 和观测时间并获取数据</strong></header><div class="c-trial-inputs">${input("实验 ID", "context.libra_id", context.libra_id, `placeholder="例如：4823214" inputmode="numeric" ${busyAttr(busy)}`)}<div><span class="c-trial-label">观测时间</span><div class="c-trial-dates">${input("开始", "context.start_date", context.start_date, `type="date" aria-label="观测开始日期" ${busyAttr(busy)}`)}<span>→</span>${input("结束", "context.end_date", context.end_date, `type="date" aria-label="观测结束日期" ${busyAttr(busy)}`)}</div></div></div><div class="c-trial-experiment" id="trial-experiment" ${context.libra_id ? "" : "hidden"}>${experimentHTML(context)}</div><details class="c-trial-advanced"><summary>更多上下文参数</summary><div class="p-form-grid two">${parameterCatalog.filter((p) => !["libra_id", "start_date", "end_date"].includes(p.key)).map((p) => input(p.name, `context.${p.key}`, context[p.key], busyAttr(busy))).join("")}</div></details><footer><div>取数计划：<strong>${modes.length} 个任务</strong><p>仅获取所选下钻维度或单独配置的整体数据</p></div>${btn("trial-run", busy ? "正在获取数据…" : "获取数据", busy ? "loader-circle" : "database", `primary ${busy ? "is-loading" : ""}`, busyAttr(busy))}</footer></section>
       <div id="trial-validation">${issuesHTML(issues)}</div><div id="trial-tasks">${trialTasksHTML(modes)}</div><div id="trial-results">${trialResultsHTML()}</div></div>
       <footer class="c-trial-footer"><div class="p-actions">${btn("close-trial", preset || trialSession.selection ? "返回指标选择" : "返回配置")}<span class="c-progress-action" data-progress="publish">${preset || trialSession.mode !== "result" ? "" : publishEntryHTML(pageProgress(obj), item ? "item" : "ability", true)}</span></div></footer>`;
@@ -1228,10 +1255,13 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     const a = store.analysis.attempts.find((a) => a.id === id);
     if (!a) { location.hash = "/modules"; return; }
     const record = a.records.find((r) => r.id === selectedRecord) || a.records[0];
+    const current = a.configurationKey === hash(moduleConfiguration(store.analysis));
     outlet.innerHTML = header(`${a.capabilityName} · ${a.sourceTrial ? "取数试跑" : "分析试跑"}`, `${date(a.startedAt)} · ${a.id}`, btn("back-modules", "返回分析配置", "arrow-left"), "分析模块", `#/modules/${store.analysis.id}`)
-      + `<div class="p-analysis-meta">${badge(statuses[a.status], a.status === "success" ? "green" : "amber")}${badge(`Libra ${a.snapshot.context.libra_id}`)}${badge(`${a.snapshot.context.start_date} 至 ${a.snapshot.context.end_date}`)}</div><div class="p-mode-tabs">${btn("analysis-output", "分析输出", "file-text", analysisTab === "output" ? "active" : "")}${btn("analysis-input", "输入数据与证据", "table-2", analysisTab === "input" ? "active" : "")}</div>`
+      + `<div class="p-analysis-meta">${badge(statuses[a.status], a.status === "success" ? "green" : "amber")}${badge(current ? "当前配置" : "历史配置快照")}${badge(`Libra ${a.snapshot.context.libra_id}`)}${badge(`${a.snapshot.context.start_date} 至 ${a.snapshot.context.end_date}`)}</div><div class="p-mode-tabs">${btn("analysis-output", "分析输出", "file-text", analysisTab === "output" ? "active" : "")}${btn("analysis-input", "输入数据与证据", "table-2", analysisTab === "input" ? "active" : "")}</div>`
       + (analysisTab === "output" ? section("分析输出", "仅描述实际输入中的组间数值。", a.status === "running" ? `<div class="p-progress"><span></span>正在检查输入并生成证据…</div>` : `<div class="p-conclusions">${a.evidence.map((e) => `<article><div>${icon("chart-no-axes-combined")}<p>${esc(e.text)}</p></div>${btn("evidence", "查看数据证据", "arrow-up-right", "link", `data-execution="${e.executionId}" data-row="${e.rowIndex}"`)}</article>`).join("")}</div><div class="p-analysis-gaps"><h3>判断边界</h3>${a.gaps.map((g) => `<p>${icon("info")}${esc(g)}</p>`).join("")}</div>`)
-        : section("本次输入数据", "", `<div class="p-mode-tabs">${a.records.map((r) => btn("analysis-record", esc(r.modeName), "", r === record ? "active" : "", `data-id="${r.id}"`)).join("")}</div>${record ? table(record, highlight) + `<details class="p-snapshot"><summary>查看执行 SQL</summary><pre>${esc(record.renderedSql || "")}</pre></details>` : `<div class="p-empty">尚无可用输入。</div>`}`));
+        : section("本次输入数据", "", `<div class="p-mode-tabs">${a.records.map((r) => btn("analysis-record", esc(r.modeName), "", r === record ? "active" : "", `data-id="${r.id}"`)).join("")}</div>${record ? table(record, highlight) + (record.calculated
+          ? `<details class="p-snapshot"><summary>计算公式与输入来源</summary>${record.fields.filter(field => field.calculated).map(field => `<p>${esc(field.name)}：${esc(field.formulaText)}；${field.sources.map(source => `${esc(source.sourceName)} v${source.ref.version}`).join("、")}</p>`).join("")}</details>`
+          : `<details class="p-snapshot"><summary>查看执行 SQL</summary><pre>${esc(record.renderedSql || "")}</pre></details>`) : `<div class="p-empty">尚无可用输入。</div>`}`));
     refreshIcons();
     if (highlight >= 0) outlet.querySelector(`#evidence-${highlight}`)?.scrollIntoView({ block: "center" });
   }
@@ -1253,12 +1283,13 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     ability = page === "ability" ? store.abilities.find((a) => a.id === id) : undefined;
     item = page === "item" ? store.items.find((s) => s.id === id) : undefined;
     const reportPage = ["history", "report"].includes(page);
-    catalog.hidden = reportPage || ["ability", "item", "modules", "analysis", "guide"].includes(page); outlet.hidden = reportPage || !catalog.hidden;
+    catalog.hidden = reportPage || ["ability", "item", "modules", "analysis", "guide", "templates", "experiments"].includes(page); outlet.hidden = reportPage || !catalog.hidden;
     reportHistory.render(page, id);
     if (ability) renderAbility(); else if (item) renderItem();
+    else if (["templates", "experiments"].includes(page)) multiExperiments.render(page, id, trialId);
     else if (page === "modules") analysisModules.render(id); else if (page === "analysis") renderAnalysis(id); else if (page === "guide") renderGuide(); else if (!reportPage) renderCatalog();
     document.querySelectorAll(".nav-item").forEach((a) => {
-      const active = a.textContent.includes(reportPage ? "过往分析报告" : ["modules", "analysis"].includes(page) ? "实验分析模块" : "取数能力");
+      const active = a.textContent.trim() === (reportPage ? "过往分析报告" : page === "templates" ? "实验报告模板" : page === "experiments" ? "实验分析" : ["modules", "analysis"].includes(page) ? "实验分析模块" : "取数能力");
       a.classList.toggle("active", active); a.setAttribute("aria-current", active ? "page" : "false");
     });
   }
@@ -1378,15 +1409,6 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       }
     }
   }
-  function ensureSingleSqlMockDimensions(source) {
-    if (outputDimensions(source).length || source.draft.mockDimensionsSeeded) return false;
-    const fields = singleSqlMockDimensions.filter((field) =>
-      !source.draft.fields.some((existing) => existing.alias === field.alias || existing.key === field.key));
-    if (!fields.length) return false;
-    source.draft.fields.push(...clone(fields));
-    source.draft.mockDimensionsSeeded = true;
-    return true;
-  }
   function applySingleSqlAiResult(source) {
     const auxiliary = new Set(["user_id", "order_id", "entity_id", "date", "app_id", "experiment_id"]);
     for (const field of source.draft.fields) {
@@ -1399,7 +1421,6 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         ? `SQL 输出指标 ${field.alias}，请在发布前确认统计口径。`
         : field.role === "dimension" ? `SQL 输出维度 ${field.alias}，请在发布前确认分层口径。` : `SQL 输出字段 ${field.alias}。`;
     }
-    ensureSingleSqlMockDimensions(source);
     syncMetrics(source);
     source.draft.metricDefinitions = metricRows(source).map((metric) => ({
       ...metric,
@@ -1482,14 +1503,14 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   }
   function openSingleSplitSql(type, key) {
     const source = abilitySqlItem();
-    const target = type === "dimension"
+    const target = type === "overall" ? { name: "整体（不拆分）", splitSql: source.draft.overallSql || singleSqlSplitSQL(source) } : type === "dimension"
       ? outputDimensions(source).find((field) => field.key === key)
       : (ability.crossDimensions || []).find((cross) => cross.id === key);
     if (!target) throw new Error("该维度配置已不存在。");
     const name = target.name;
     singleSplitSqlDraft = { type, key, name, value: target.splitSql || "" };
     const readonly = abilityLoadReadOnly(ability);
-    const dimensionKeys = type === "dimension"
+    const dimensionKeys = type === "overall" ? [] : type === "dimension"
       ? [target.key]
       : crossDimensionKeys(target);
     openDialog(`维度拆分 SQL：${esc(name)}`,
@@ -1501,7 +1522,9 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
   function saveSingleSplitSql() {
     const source = abilitySqlItem();
     if (!singleSplitSqlDraft?.value.trim()) throw new Error("拆分 SQL 不能为空。");
-    if (singleSplitSqlDraft.type === "dimension") {
+    if (singleSplitSqlDraft.type === "overall") {
+      source.draft.overallSql = singleSplitSqlDraft.value;
+    } else if (singleSplitSqlDraft.type === "dimension") {
       const field = outputDimensions(source).find((candidate) => candidate.key === singleSplitSqlDraft.key);
       if (!field) throw new Error("该维度已不存在。");
       field.splitSql = singleSplitSqlDraft.value;
@@ -1642,8 +1665,17 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     if (trigger.disabled) return;
     try {
       if (a.startsWith("mod-")) { await analysisModules.handleAction(trigger); return; }
+      if (a.startsWith("ma-")) { await multiExperiments.handleAction(trigger); return; }
       if (a === "close") { closeDialog(); return; }
       if (a === "close-trial") { closeTrial(); return; }
+      if (a === "trial-metric-all" || a === "trial-overall-only") {
+        if (busy) return;
+        const content = abilityCatalogContent(store, ability);
+        if (a === "trial-metric-all") trialSession.selection.metrics = trialSession.selection.metrics.length === content.metrics.length ? [] : content.metrics.filter((field) => field.available).map((field) => field.id);
+        else trialSession.selection.modes = content.modes.filter((mode) => mode.kind === "overall").map((mode) => mode.id);
+        trialSession.mode = "input"; trialSession.runId = ""; selectedRun = ""; selectedRecord = ""; issues = [];
+        renderTrial(); return;
+      }
       if (trialSession?.recordView && !["trial-history", "trial-record", "view-trial-record", "select-run", "select-record", "trial-current", "return-current-validation"].includes(a)) {
         throw new Error("试跑记录只读，请返回当前验证。");
       }
@@ -1651,7 +1683,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         const analysisPage = /^#\/(?:modules|analysis)(?:\/|$)/.test(location.hash);
         const target = item || ability || (analysisPage ? store.analysis : null);
         dialogKind = item ? "item-context" : ability ? "ability-context" : "analysis-context";
-        openDialog("演示环境", `<p>使用示例数据，配置与发布版本仅保存在当前浏览器。</p>${target ? `<details class="p-scenarios"><summary>测试设置</summary>${select("取数场景", "scenario", Object.entries(scenarios), target.scenario || "normal")}${item || ability ? check("发布失败", "publish-failure", publishFailure) : ""}</details>` : ""}`);
+        openDialog("演示环境", `<p>使用示例数据，配置与发布版本仅保存在当前浏览器。</p>${target ? `<details class="p-scenarios"><summary>测试设置</summary>${select("取数场景", "scenario", Object.entries(scenarios), target.scenario || "normal")}${item || ability ? check("发布失败", "publish-failure", publishFailure) : ""}</details>` : check("显示此前保存的能力", "catalog-show-legacy", catalogShowLegacy)}`);
         return;
       }
       if (a === "single-cancel") {
@@ -1681,6 +1713,28 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         return;
       }
       if (a === "single-copy-sql") { await copyText(abilitySqlItem().draft.sql, "SQL 已复制"); return; }
+      if (a === "single-view-overall-sql") { openSingleSplitSql("overall", "overall"); return; }
+      if (a === "single-inspect-metric") {
+        const field = metricRows(abilitySqlItem())[Number(trigger.dataset.index)];
+        openDialog(`指标：${esc(field.name)}`, `${readonlyField("SQL 字段 / 表达式", field.valueAlias)}${readonlyField("展示格式", field.format)}${readonlyField("口径", field.description)}`);
+        return;
+      }
+      if (a === "single-validate") {
+        assertMutable(ability);
+        const source = abilitySqlItem();
+        source.draft.validationMessage = "正在校验 SQL…";
+        outlet.querySelector("#single-sql-parse-tools").innerHTML = singleParseActionsHTML(source);
+        refreshIcons();
+        try {
+          await sqlQuery({ sql: source.draft.sql.replace(/\{\{\w+\}\}/g, ""), bindings: source.draft.parameters, parsing: true });
+          source.draft.validationMessage = "SQL 语法校验通过。输出配置保持不变，可继续解析或编辑。";
+        } catch (error) {
+          source.draft.validationMessage = `SQL 校验失败：${error.message}`;
+        }
+        persist();
+        renderSingleSqlAbility();
+        return;
+      }
       if (a === "single-sql-fullscreen") {
         singleSqlFullscreen = !singleSqlFullscreen;
         document.body.classList.toggle("c-sql-fullscreen-open", singleSqlFullscreen);
@@ -1740,6 +1794,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         return;
       }
       if (a === "single-publish") {
+        if (busy) return;
         assertMutable(ability);
         ["name", "description", "goal"].forEach((key) => abilityTouched.add(`${ability.id}:${key}`));
         const source = ensureSingleSqlAbility(ability);
@@ -1752,10 +1807,27 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
           return;
         }
         if (publishFailure) throw new Error("发布失败，未创建版本，请重试");
-        const version = publishAbility(store, ability);
-        persist();
-        renderSingleSqlAbility();
-        showToast("发布成功。该取数能力已可在分析模块新建时关联试跑。");
+        const target = ability, signature = abilitySignature(store, target);
+        busy = true; renderSingleSqlAbility();
+        try {
+          for (const mode of abilityModes(store, target)) {
+            const result = await sqlQuery({ sql: mode.sql, bindings: mode.parameters, parsing: true });
+            for (const field of mode.fields) {
+              const index = result.columns.indexOf(field.alias);
+              if (index < 0) throw new Error(`${mode.name}：取数 SQL 缺少输出字段 ${field.alias}。`);
+              if (result.types[index] !== "unknown" && result.types[index] !== field.type)
+                throw new Error(`${mode.name}：${field.alias} 的实际类型与配置不一致。`);
+            }
+          }
+          if (abilitySignature(store, target) !== signature) throw new Error("校验期间配置已变化，请重新校验发布。");
+          publishAbility(store, target); persist();
+          showToast("发布成功。该取数能力已可在分析模块新建时关联试跑。");
+        } catch (error) {
+          issues = [error.message]; showToast(error.message);
+        } finally {
+          busy = false;
+          if (ability === target) renderSingleSqlAbility();
+        }
         return;
       }
       if (a.startsWith("single-metric-")) {
@@ -2028,6 +2100,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       if (a === "new-ability") {
         const ability = newAbility("");
         ability.singleSqlFlow = true;
+        ability.siteWorkspace = true;
         store.abilities.push(ability);
         persist();
         location.hash = `/ability/${ability.id}`;
@@ -2052,10 +2125,17 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
         panel.querySelectorAll('[data-model="catalog-metric"]').forEach((checkbox) => { checkbox.checked = draft.metrics.includes(checkbox.value); });
         persist(); refreshCatalogPanel(panel, obj, content); return;
       }
+      if (a === "catalog-overall-only") {
+        const obj = store.abilities.find((obj) => obj.id === id), content = abilityCatalogContent(store, obj), draft = catalogDraft(obj, content);
+        draft.dimensions = content.dimensions.filter((field) => field.id === "overall").map((field) => field.id);
+        const panel = trigger.closest("[data-managed-id]");
+        panel.querySelectorAll('[data-model="catalog-dimension"]').forEach((checkbox) => { checkbox.checked = draft.dimensions.includes(checkbox.value); });
+        persist(); refreshCatalogPanel(panel, obj, content); return;
+      }
       if (a === "run-catalog") {
         const target = store.abilities.find((obj) => obj.id === id), actions = abilityCatalogActions(store, target);
         if (!actions.trial) throw new Error("请先完成取数配置后再试跑。");
-        const selection = actions.trial.history || !trigger.closest("[data-managed-id]") ? null : catalogTrialSelection(target);
+        const selection = !trigger.closest("[data-managed-id]") || !catalogDraft(target).metrics.length ? null : catalogTrialSelection(target);
         if (selection) abilityTrialModes(store, target, selection);
         openTrial("ability", id, actions.trial.runId, actions.trial.history ? "record" : "input", selection); return;
       }
@@ -2335,7 +2415,19 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     const el = e.target, model = el.dataset.model; if (!model) return;
     if (el.disabled) return;
     if (analysisModules.handleModel(e)) return;
+    if (multiExperiments.handleModel(e)) return;
     if (trialSession?.recordView) return;
+    if (model === "trial-field-metric" || model === "trial-field-dimension") {
+      if (e.type !== "change" || busy) return;
+      const selection = trialSession.selection, content = abilityCatalogContent(store, ability);
+      if (model === "trial-field-metric") selection.metrics = el.checked ? [...new Set([...selection.metrics, el.value])] : selection.metrics.filter((id) => id !== el.value);
+      else {
+        const modes = content.dimensions.find((field) => field.id === el.value)?.modeIds || [];
+        selection.modes = el.checked ? [...new Set([...selection.modes, ...modes])] : selection.modes.filter((id) => !modes.includes(id));
+      }
+      trialSession.mode = "input"; trialSession.runId = ""; selectedRun = ""; selectedRecord = ""; issues = [];
+      renderTrial(); return;
+    }
     if (["catalog-metric", "catalog-dimension", "catalog-metric-search"].includes(model)) {
       if (e.type !== (model === "catalog-metric-search" ? "input" : "change")) return;
       const panel = el.closest("[data-managed-id]"), obj = store.abilities.find((obj) => obj.id === panel.dataset.managedId);
@@ -2359,6 +2451,10 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     if (["INPUT", "TEXTAREA"].includes(el.tagName) && !["checkbox", "radio"].includes(el.type) && e.type === "change") return;
     const parts = model.split("."), value = el.type === "checkbox" ? el.checked : el.type === "number" ? Number(el.value) : el.value;
     const [kind, key, detail] = parts;
+    if (kind === "catalog-show-legacy") {
+      catalogShowLegacy = value;
+      renderCatalog(); return;
+    }
     if (kind === "ability-source-search") {
       abilitySourceSearch = value; abilityLoadError = ""; refreshAbilitySources(); return;
     }
@@ -2369,9 +2465,10 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     if (kind === "parameter-search") {
       parameterSearch = value; outlet.querySelector("#parameter-catalog-list").innerHTML = parameterRows(); refreshIcons(); return;
     }
-    if (["catalog-source", "catalog-goal", "catalog-state"].includes(kind)) {
+    if (["catalog-source", "catalog-goal", "catalog-state", "catalog-creator"].includes(kind)) {
       if (kind === "catalog-source") catalogSource = value;
       else if (kind === "catalog-goal") catalogGoal = value;
+      else if (kind === "catalog-creator") catalogCreator = value;
       else catalogState = value;
       renderCatalog(); return;
     }
@@ -2389,6 +2486,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       const source = abilitySqlItem();
       try { assertMutable(ability); assertMutable(source); } catch (error) { showToast(error.message); return; }
       source.draft.sql = value;
+      source.draft.validationMessage = "";
       delete source.draft.mockDimensionsSeeded;
       source.draft.parseError = "";
       ability.parseStatus = "idle";
@@ -2411,6 +2509,10 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
       const row = source.draft.metricDefinitions[Number(key)];
       if (!row) return;
       row[detail] = value;
+      if (detail === "format") {
+        row.precision = value === "integer" ? 0 : 2;
+        row.unit = value === "currency" ? "元" : "";
+      }
       row.calculation = "value";
       row.fromOutput = false;
       const reference = ability.metrics.find((candidate) => candidate.itemId === source.id);
@@ -2634,6 +2736,8 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     if (a.textContent.includes("取数能力")) a.href = "#/capabilities";
     if (a.textContent.includes("实验分析模块")) a.href = "#/modules";
     if (a.textContent.includes("过往分析报告")) a.href = "#/history";
+    if (a.textContent.trim() === "实验分析") a.href = "#/experiments";
+    if (a.textContent.trim() === "实验报告模板") a.href = "#/templates";
   });
   document.querySelectorAll(".command-body button").forEach((a) => { a.addEventListener("click", () => {
     location.hash = a.textContent.includes("分析") ? "/modules" : "/capabilities";

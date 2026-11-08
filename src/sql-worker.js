@@ -109,7 +109,9 @@ function bindSQL(sql, bindings, context, parsing) {
     if (type.endsWith("_list") && !listUsage) throw new Error(`列表参数 ${name} 需要用于 IN (...)。`);
     // Unknown aliases get a typed syntax-check sample, never a runtime fallback.
     const sample = { number: "1", number_list: "1,2", date: "2026-10-01", string: "demo" };
-    return literal(parsing ? (source?.type === type ? defaultContext[source.key] : sample[type]) : context[source.key], type, name);
+    const contextKey = source?.contextKey || source?.key;
+    const runtimeValue = context[contextKey] ?? (source && !["libra_id", "pgdp_experiment_id", "start_date", "end_date", "coupon_meta_ids", "versionIds"].includes(source.key) ? source.value : undefined);
+    return literal(parsing ? (source?.type === type ? defaultContext[source.key] : sample[type]) : runtimeValue, type, name);
   });
   if (!parsing) {
     const requiredDates = params.some((p) => ["start_date", "end_date"].includes(p.source));

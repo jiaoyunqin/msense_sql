@@ -2,7 +2,8 @@ import { createIcons, icons } from "lucide";
 import { clone, uid, currentActor, businessGoal } from "./composer-data.js";
 import {
   initializeModules, moduleBuiltins, builtinSource, sqlSource, sourceDefinition, newAnalysisModule,
-  moduleHash, moduleConfiguration, moduleState, moduleIssues
+  moduleHash, moduleConfiguration, moduleState, moduleIssues, calculationCandidates,
+  calculatedMetricIssues, includeCalculationDependency, newCalculatedMetric, metricReferenceKey, copyModuleSources
 } from "./analysis-module-data.js";
 import { runModule } from "./analysis-module-runner.js";
 import "./analysis-modules.css";
@@ -17,7 +18,8 @@ const area = (title, key, value, placeholder = "") => `<label class="am-field am
 
 export function createAnalysisModules({ store, outlet, main, persist, showToast, openDialog, closeDialog, render }) {
   initializeModules(store);
-  let search = "", state = "all", sort = "updated", errors = [], running = false;
+  let search = "", creator = "", state = "all", type = "all", sort = "updated", errors = [], running = false;
+  const creatorOf = module => String(module.createdBy || "").trim();
   function activate(id) {
     const module = store.modules.find((entry) => entry.id === id);
     if (module) store.analysis = module;
@@ -28,14 +30,30 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
     outlet.innerHTML = `<div class="am-list-page">
       <header class="am-list-header"><div><h1>实验分析模块</h1><p>${modules.length} 项有效配置</p></div>${button("new", "新建实验分析模块", "plus", "", "primary")}</header>
       <div class="am-toolbar"><div class="am-filters"><label class="am-search">${icon("search")}<input type="search" data-model="mod-search" aria-label="搜索模块名称或说明" placeholder="搜索名称或说明" value="${esc(search)}"></label>
+      <details class="am-multi-select am-creator-filter"><summary aria-label="按创建人筛选"><span>${esc(creator || "全部创建人")}</span>${icon("chevron-down")}</summary>
+        <div class="am-picker-menu"><label class="am-search">${icon("search")}<input type="search" data-model="mod-creator-search" aria-label="搜索创建人" placeholder="搜索创建人"></label>
+          <div class="am-creator-options" role="listbox" aria-label="创建人"></div></div></details>
       <select data-model="mod-state" aria-label="模块状态">${[["all", "全部有效状态"], ["online", "已上线"], ["draft", "草稿"], ["offline", "已下线"]].map(([value, name]) => `<option value="${value}" ${state === value ? "selected" : ""}>${name}</option>`).join("")}</select>
+      <select data-model="mod-type" aria-label="模块分析类型">${[["all", "全部分析类型"], ["single", "单实验分析"], ["multi", "多实验分析"]].map(([value, name]) => `<option value="${value}" ${type === value ? "selected" : ""}>${name}</option>`).join("")}</select>
       <select data-model="mod-sort" aria-label="模块排序"><option value="updated" ${sort === "updated" ? "selected" : ""}>最近更新</option><option value="name" ${sort === "name" ? "selected" : ""}>名称排序</option></select></div>
       <p class="am-result-count"></p></div><div class="am-module-grid"></div></div>`;
+    renderCreatorOptions();
     renderListResults();
+  }
+  function renderCreatorOptions(query = "") {
+    const creators = [...new Set(store.modules.filter(module => !module.archived).map(creatorOf).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, "zh-CN"))
+      .filter(name => name.toLowerCase().includes(query.trim().toLowerCase()));
+    outlet.querySelector(".am-creator-options").innerHTML = [["", "全部创建人"], ...creators.map(name => [name, name])]
+      .map(([value, name]) => `<button type="button" role="option" aria-selected="${creator === value}" data-action="mod-filter-creator" data-creator="${esc(value)}"><span>${esc(name)}</span>${creator === value ? icon("check") : ""}</button>`).join("")
+      + (creators.length ? "" : '<p class="am-creator-empty" role="status">未找到匹配的创建人</p>');
+    createIcons({ icons });
   }
   function renderListResults() {
     const modules = store.modules.filter((module) => !module.archived
+      && (!creator || creatorOf(module) === creator)
       && (state === "all" || moduleState(module) === state)
+      && (type === "all" || module.analysisType === type)
       && `${module.name} ${module.description}`.toLowerCase().includes(search.toLowerCase()))
       .sort((a, b) => sort === "name" ? a.name.localeCompare(b.name, "zh-CN")
         : (b.updatedAt || b.savedAt || "").localeCompare(a.updatedAt || a.savedAt || ""));
@@ -46,7 +64,7 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
         <div class="am-card-top"><span class="am-module-icon">${icon("flask-conical")}</span><span class="am-state ${status}">${stateNames[status]}</span></div>
         <a class="am-card-title" href="#/modules/${module.id}">${esc(module.name || "未命名实验分析模块")}</a>
         <p class="am-card-description">${esc(module.description)}</p>
-        <div class="am-tags"><span>${businessGoal}</span><span>${esc(module.apps.join("、") || "不限端")}</span></div>
+        <div class="am-tags"><span>${module.analysisType === "multi" ? "多实验分析" : "单实验分析"}</span><span>${businessGoal}</span><span>${esc(module.apps.join("、") || "不限端")}</span></div>
         <footer>${module.updatedAt || module.savedAt ? `<small>更新于 ${esc(time(module.updatedAt || module.savedAt))}</small>` : "<span></span>"}
         <div class="am-card-actions">${button("copy", "", "copy", `data-id="${module.id}" aria-label="复制${esc(module.name)}" title="复制"`)}
         <a href="#/modules/${module.id}" class="am-button">${icon("pencil")}编辑</a>
@@ -65,6 +83,55 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
     ];
   }
   const optionKey = (source) => `${source.kind}:${source.capabilityId}:${source.version}`;
+  const calculationTypes = [["/", "相除（A ÷ B）"], ["+", "相加（A + B）"], ["-", "相减（A − B）"], ["*", "相乘（A × B）"]];
+  const operatorLabel = operator => ({ "/": "÷", "+": "+", "-": "−", "*": "×" })[operator] || "÷";
+  function calculationPicker(metric, operand, candidates) {
+    const ref = metric.formula[operand], key = metric.key;
+    if (ref?.type === "constant") return `<div class="am-calc-constant"><input type="number" step="any" data-model="mod-calc.value" data-key="${key}" aria-label="${esc(metric.name || "计算指标")}固定数值" placeholder="输入数值" value="${esc(ref.value ?? "")}">
+      ${button("calc-use-metric", "", "list-filter", `data-key="${key}" title="改选指标" aria-label="改选指标"`)}</div>`;
+    const current = candidates.find(candidate => metricReferenceKey(candidate.ref) === metricReferenceKey(ref));
+    return `<details class="am-multi-select am-calc-picker"><summary aria-label="${operand === "left" ? "指标 A" : "指标 B 或数值"}"><span>${esc(current?.name || (ref ? `已失效：${ref.key}` : "选择指标"))}</span>${icon("chevron-down")}</summary>
+      <div class="am-picker-menu"><label class="am-search">${icon("search")}<input type="search" data-model="mod-calc-search" placeholder="搜索指标或取数能力" aria-label="搜索计算输入指标"></label>
+        <div class="am-calc-options">${operand === "right" ? button("calc-constant", "使用固定数值", "hash", `data-key="${key}"`, "am-calc-constant-choice") : ""}
+        ${[...new Set(candidates.map(candidate => candidate.ref.sourceId))].map(sourceId => {
+          const group = candidates.filter(candidate => candidate.ref.sourceId === sourceId);
+          return `<div class="am-calc-option-group"><strong>${esc(group[0].sourceName)} · v${group[0].ref.version}</strong>${group.map(candidate =>
+            `<button type="button" data-action="mod-calc-select" data-key="${key}" data-operand="${operand}" data-ref="${esc(encodeURIComponent(JSON.stringify(candidate.ref)))}" data-search="${esc(`${candidate.name} ${candidate.sourceName} ${candidate.ref.key}`.toLowerCase())}" aria-pressed="${metricReferenceKey(ref) === metricReferenceKey(candidate.ref)}"><span>${esc(candidate.name)}</span>${metricReferenceKey(ref) === metricReferenceKey(candidate.ref) ? icon("check") : ""}</button>`).join("")}</div>`;
+        }).join("")}<p class="am-calc-search-empty" ${candidates.length ? "hidden" : ""}>没有可选的数值指标</p></div></div></details>`;
+  }
+  function calculationsHTML() {
+    const module = store.analysis, metrics = module.calculatedMetrics || [];
+    if (!module.sources.length && !metrics.length) return "";
+    const candidates = calculationCandidates(store, module);
+    return `<section class="am-calculations" aria-label="计算指标">
+      <header><strong>计算指标 <span>（可选）</span></strong>${button("calc-add", "添加计算指标", "plus", candidates.length ? "" : 'disabled title="当前取数能力暂无可计算指标"')}</header>
+      ${metrics.length ? `<div class="am-calc-head"><span>指标名称</span><span>计算类型</span><span>表达式</span><span>操作</span></div><div class="am-calc-rows">${metrics.map(metric => `<div class="am-calc-row" data-calculation-key="${metric.key}">
+        <div class="am-calc-cell"><span class="am-calc-mobile-label">指标名称</span><input data-model="mod-calc.name" data-key="${metric.key}" aria-label="计算指标名称" value="${esc(metric.name)}" placeholder="输入指标名称"></div>
+        <div class="am-calc-cell"><span class="am-calc-mobile-label">计算类型</span><select data-model="mod-calc.operator" data-key="${metric.key}" aria-label="计算类型">${calculationTypes.map(([value, label]) => `<option value="${value}" ${metric.formula.operator === value ? "selected" : ""}>${label}</option>`).join("")}</select></div>
+        <div class="am-calc-cell"><span class="am-calc-mobile-label">表达式</span><div class="am-calc-expression">${calculationPicker(metric, "left", candidates)}<span class="am-calc-sign">${operatorLabel(metric.formula.operator)}</span>${calculationPicker(metric, "right", candidates)}</div></div>
+        <div class="am-calc-row-actions"><details class="am-multi-select am-calc-more"><summary aria-label="${esc(metric.name || "计算指标")}更多设置" title="更多设置">${icon("ellipsis")}</summary><div class="am-picker-menu">
+          <label class="am-field"><span>显示格式</span><select data-model="mod-calc.format" data-key="${metric.key}" aria-label="计算指标显示格式"><option value="number" ${metric.format === "number" ? "selected" : ""}>数值</option><option value="percent" ${metric.format === "percent" ? "selected" : ""}>百分比</option></select></label>
+          <label class="am-field"><span>小数位</span><select data-model="mod-calc.precision" data-key="${metric.key}" aria-label="计算指标小数位">${Array.from({ length: 7 }, (_, precision) => `<option value="${precision}" ${metric.precision === precision ? "selected" : ""}>${precision} 位</option>`).join("")}</select></label>
+          <label class="am-report-check"><input type="checkbox" data-model="mod-calc.report" data-key="${metric.key}" ${metric.showInReport ? "checked" : ""}>报告中展示</label></div></details>
+          ${button("calc-delete", "", "trash-2", `data-key="${metric.key}" title="删除计算指标" aria-label="删除${esc(metric.name || "计算指标")}"`)}</div>
+        <div class="am-calc-issues" role="status"></div></div>`).join("")}</div>` : `<p class="am-calc-hint">${candidates.length ? "用已选取数能力的指标进行基础计算。" : "当前取数能力暂无可计算指标"}</p>`}
+      </section>`;
+  }
+  function refreshCalculations() {
+    const container = outlet.querySelector(".am-calculations-wrap");
+    if (!container) return;
+    container.innerHTML = calculationsHTML(); refreshCalculationIssues(); createIcons({ icons });
+  }
+  function refreshCalculationIssues() {
+    const issues = calculatedMetricIssues(store, store.analysis);
+    outlet.querySelectorAll(".am-calc-row").forEach(row => {
+      const messages = issues.filter(issue => issue.key === row.dataset.calculationKey).map(issue => issue.message);
+      row.classList.toggle("invalid", messages.length > 0);
+      row.querySelector(".am-calc-issues").innerHTML = [...new Set(messages)].map(message => `<p>${esc(message)}</p>`).join("");
+      row.querySelector('[data-model="mod-calc.name"]').setAttribute("aria-invalid", String(messages.length > 0));
+    });
+    refreshActions();
+  }
   function renderPicker() {
     const module = store.analysis;
     const chosen = options().filter((option) => module.sources.some((source) => optionKey(source) === option.key));
@@ -94,7 +161,7 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       <div class="am-source-actions"><label class="am-report-check"><input type="checkbox" data-model="mod-report" data-source-id="${source.id}" ${source.showInReport ? "checked" : ""}>报告中展示</label>
       ${button("move", "", "arrow-up", `data-id="${source.id}" data-direction="-1" aria-label="上移${esc(definition.name)}" ${index === 0 ? "disabled" : ""}`)}
       ${button("move", "", "arrow-down", `data-id="${source.id}" data-direction="1" aria-label="下移${esc(definition.name)}" ${index === module.sources.length - 1 ? "disabled" : ""}`)}
-      ${button("trial-source", "试跑取数", "flask-conical", `data-id="${source.id}" ${running || moduleIssues(store, { ...module, name: module.name || "新模块" }, [source]).length ? "disabled" : ""}`)}
+      ${module.analysisType !== "multi" ? button("trial-source", "试跑取数", "flask-conical", `data-id="${source.id}" ${running || moduleIssues(store, { ...module, name: module.name || "新模块" }, [source], { sourceTrial: true }).length ? "disabled" : ""}`) : ""}
       ${button("expand", source.expanded ? "收起" : "展开", source.expanded ? "chevron-up" : "chevron-down", `data-id="${source.id}" aria-expanded="${source.expanded}" aria-controls="source-content-${source.id}"`)}
       ${button("remove-source", "移除", "trash-2", `data-id="${source.id}"`)}</div></header>
       <div class="am-source-content" id="source-content-${source.id}" ${source.expanded ? "" : "hidden"}>
@@ -117,24 +184,29 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       <div class="am-editor-body"><div class="am-form-content"><div class="am-errors">${errors.length ? `<div class="p-issues" role="alert"><ul>${errors.map((error) => `<li>${esc(error)}</li>`).join("")}</ul></div>` : ""}</div>
         <div class="am-basics">${field("模块名称", "name", module.name, "例如：优惠券核销归因")}${field("模块说明", "description", module.description, "说明模块覆盖的分析范围")}
         <div class="am-field"><span>业务目标</span><div class="am-goal">${businessGoal}${icon("chevron-down")}</div></div>
-        <label class="am-field"><span>适用端（可选）</span><select data-model="mod-apps"><option value="" ${!module.apps.length ? "selected" : ""}>不选择表示不限端</option><option value="抖音" ${module.apps.join(",") === "抖音" ? "selected" : ""}>抖音</option><option value="极速版" ${module.apps.join(",") === "极速版" ? "selected" : ""}>极速版</option><option value="抖音,极速版" ${module.apps.length > 1 ? "selected" : ""}>抖音、极速版</option></select></label></div>
+        <label class="am-field"><span>适用端（可选）</span><select data-model="mod-apps"><option value="" ${!module.apps.length ? "selected" : ""}>不选择表示不限端</option><option value="抖音" ${module.apps.join(",") === "抖音" ? "selected" : ""}>抖音</option><option value="极速版" ${module.apps.join(",") === "极速版" ? "selected" : ""}>极速版</option><option value="抖音,极速版" ${module.apps.length > 1 ? "selected" : ""}>抖音、极速版</option></select></label>
+        <label class="am-field"><span>分析类型</span><select data-model="mod-field.analysisType"><option value="single" ${module.analysisType === "single" ? "selected" : ""}>单实验分析</option><option value="multi" ${module.analysisType === "multi" ? "selected" : ""}>多实验分析</option></select></label></div>
         <div class="am-picker-wrap">${renderPicker()}</div><div class="am-sources">${module.sources.map(sourceCard).join("")}</div>
+        <div class="am-calculations-wrap">${calculationsHTML()}</div>
         ${area("分析思路（可选）", "reasoning", module.reasoning, "如需结论，请说明分析顺序、判断方法和归因证据的组织方式")}
         ${area("注意事项（可选）", "considerations", module.considerations, "补充分析边界、数据口径及需要关注的问题")}
         ${module.attempts.length ? `<details class="am-trial-history"><summary>试跑记录 <span>${module.attempts.length}</span></summary><div>${module.attempts.map((attempt) => `<a href="#/analysis/${attempt.id}"><span>${attempt.sourceTrial ? "取数试跑" : "分析试跑"} · ${attempt.status === "success" ? "成功" : attempt.status === "running" ? "运行中" : "失败"}</span><small>${esc(time(attempt.startedAt))}</small>${icon("arrow-up-right")}</a>`).join("")}</div></details>` : ""}
+        ${module.multiAttempts?.length ? `<details class="am-trial-history"><summary>多实验试跑记录 <span>${module.multiAttempts.length}</span></summary><div>${module.multiAttempts.map(attempt => `<a href="${attempt.reportId ? `#/report/${attempt.reportId}` : `#/experiments/task/${attempt.taskId}`}"><span>模块私有试跑 · ${attempt.status === "running" ? "运行中" : attempt.status === "success" ? "成功" : "查看任务"}</span><small>${esc(time(attempt.startedAt))}</small></a>`).join("")}</div></details>` : ""}
       </div><aside class="am-version-panel"><header><strong>版本记录</strong><span>${module.versions.length} 个版本</span></header>
         ${module.versions.length ? module.versions.slice().reverse().map((version) => `<button type="button" data-action="mod-version" data-number="${version.number}"><strong>v${version.number}</strong><small>${esc(time(version.publishedAt))}</small><span>${esc(version.operator)}</span></button>`).join("") : "<p>暂无版本记录</p>"}</aside></div></div>`;
-    createIcons({ icons });
+    refreshCalculationIssues(); createIcons({ icons });
   }
   function refreshSources() {
     outlet.querySelector(".am-sources").innerHTML = store.analysis.sources.map(sourceCard).join("");
     outlet.querySelector(".am-picker-wrap").innerHTML = renderPicker();
-    createIcons({ icons }); refreshActions();
+    refreshCalculations(); createIcons({ icons }); refreshActions();
   }
   function refreshActions() {
     const module = store.analysis;
     const trial = outlet.querySelector('[data-action="mod-trial"]');
     if (trial) trial.disabled = running || moduleIssues(store, module).length > 0 || !module.reasoning.trim();
+    const publish = outlet.querySelector('[data-action="mod-publish"]');
+    if (publish) publish.disabled = running || calculatedMetricIssues(store, module).length > 0;
     const h1 = outlet.querySelector(".am-heading-line h1");
     if (h1) h1.textContent = module.name || "新建实验分析模块";
     const status = outlet.querySelector(".am-heading-line .am-state"), latest = module.versions.at(-1);
@@ -153,9 +225,10 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       if (all) all.textContent = selected.length === fields.length ? "清空" : "全选";
       column.querySelectorAll("input[type=checkbox]").forEach((input) => { input.checked = selected.includes(input.value); });
     }
-    card.querySelector('[data-action="mod-trial-source"]').disabled = running
-      || moduleIssues(store, { ...store.analysis, name: store.analysis.name || "新模块" }, [source]).length > 0;
-    refreshActions();
+    const sourceTrial = card.querySelector('[data-action="mod-trial-source"]');
+    if (sourceTrial) sourceTrial.disabled = running
+      || moduleIssues(store, { ...store.analysis, name: store.analysis.name || "新模块" }, [source], { sourceTrial: true }).length > 0;
+    refreshCalculationIssues();
   }
   const touch = () => { store.analysis.updatedAt = new Date().toISOString(); persist(); };
   async function startTrial(sourceId = "") {
@@ -172,13 +245,25 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
   }
   async function handleAction(trigger) {
     const action = trigger.dataset.action.slice(4), id = trigger.dataset.id;
+    if (action === "filter-creator") {
+      creator = trigger.dataset.creator;
+      const menu = outlet.querySelector(".am-creator-filter");
+      menu.querySelector("summary > span").textContent = creator || "全部创建人";
+      menu.querySelector("input").value = "";
+      renderCreatorOptions();
+      renderListResults();
+      menu.open = false;
+      menu.querySelector("summary").focus({ preventScroll: true });
+      return;
+    }
     const module = store.analysis, source = module.sources.find((source) => source.id === id);
     if (action === "new") { location.hash = "/modules/new"; return; }
     if (action === "copy") {
       const original = activate(id), copy = clone(original);
-      Object.assign(copy, { id: uid("module"), key: "", name: `${copy.name}（副本）`, savedAt: "",
-        updatedAt: new Date().toISOString(), versions: [], attempts: [], enabled: true, archived: false });
-      copy.sources.forEach((source) => { source.id = uid("source"); });
+      Object.assign(copy, { id: uid("module"), key: "", name: `${copy.name}（副本）`, createdBy: currentActor, savedAt: "",
+        updatedAt: new Date().toISOString(), versions: [], attempts: [], multiAttempts: [], enabled: true, archived: false });
+      const remapped = copyModuleSources(original);
+      copy.sources = remapped.sources; copy.calculatedMetrics = remapped.calculatedMetrics;
       store.modules.push(copy); store.analysis = copy; persist(); location.hash = `/modules/${copy.id}`; return;
     }
     if (action === "archive") {
@@ -191,6 +276,36 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       persist(); closeDialog(); render(); showToast("模块已归档"); return;
     }
     if (action === "cancel") { closeDialog(); return; }
+    if (action.startsWith("calc-")) {
+      const metric = module.calculatedMetrics.find(metric => metric.key === trigger.dataset.key);
+      if (action === "calc-add") {
+        if (!calculationCandidates(store, module).length) return;
+        const added = newCalculatedMetric(); module.calculatedMetrics.push(added);
+        touch(); refreshCalculations();
+        outlet.querySelector(`[data-calculation-key="${added.key}"] input`).focus(); return;
+      }
+      if (!metric) return;
+      if (action === "calc-delete") module.calculatedMetrics = module.calculatedMetrics.filter(entry => entry !== metric);
+      if (action === "calc-constant") metric.formula.right = { type: "constant", value: null };
+      if (action === "calc-use-metric") metric.formula.right = null;
+      if (action === "calc-select") {
+        const ref = JSON.parse(decodeURIComponent(trigger.dataset.ref));
+        try {
+          const included = includeCalculationDependency(store, module, ref);
+          metric.formula[trigger.dataset.operand] = ref;
+          if (included.added) {
+            refreshSelection(module.sources.find(source => source.id === included.sourceId));
+            showToast("已加入取数指标");
+          }
+        } catch (error) { showToast(error.message); return; }
+      }
+      touch(); refreshCalculations();
+      const row = outlet.querySelector(`[data-calculation-key="${metric.key}"]`);
+      if (action === "calc-constant") row?.querySelector('[data-model="mod-calc.value"]')?.focus();
+      else if (action === "calc-select") row?.querySelectorAll(".am-calc-picker summary")[trigger.dataset.operand === "left" ? 0 : 1]?.focus();
+      else if (action === "calc-delete") outlet.querySelector('[data-action="mod-calc-add"]')?.focus();
+      return;
+    }
     if (action === "toggle-state") {
       const target = activate(id);
       if (!target.versions.length) { location.hash = `/modules/${id}`; showToast("发布版本后即可上线"); return; }
@@ -239,6 +354,11 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       touch(); refreshSelection(source); return;
     }
     if (action === "trial" || action === "trial-source") {
+      if (module.analysisType === "multi") {
+        const validation = moduleIssues(store, module);
+        if (validation.length) { errors = validation; renderEditor(module.id); return; }
+        location.hash = `/experiments/module/${module.id}`; return;
+      }
       openDialog(action === "trial" ? "分析试跑" : "取数试跑",
         `<div class="am-context-grid">${Object.entries(module.context).map(([key, value]) => field(key === "libra_id" ? "Libra 实验 ID" : key === "start_date" ? "观测开始日期" : key === "end_date" ? "观测结束日期" : key, `context:${key}`, value)).join("")}</div>`,
         button("cancel", "取消") + button("start-trial", "开始试跑", "flask-conical", `data-id="${action === "trial-source" ? id : ""}"`, "primary")); return;
@@ -251,13 +371,34 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
     const change = el.type === "checkbox" || el.tagName === "SELECT";
     if (change && event.type !== "change" || !change && event.type !== "input") return true;
     if (model === "mod-search") { search = el.value; renderListResults(); return true; }
-    if (model === "mod-state" || model === "mod-sort") { if (model === "mod-state") state = el.value; else sort = el.value; renderListResults(); return true; }
+    if (model === "mod-creator-search") { renderCreatorOptions(el.value); return true; }
+    if (model === "mod-state" || model === "mod-sort" || model === "mod-type") { if (model === "mod-state") state = el.value; else if (model === "mod-type") type = el.value; else sort = el.value; renderListResults(); return true; }
     const module = store.analysis;
+    if (model === "mod-calc-search") {
+      const picker = el.closest(".am-calc-picker"), query = el.value.trim().toLowerCase();
+      picker.querySelectorAll("[data-search]").forEach(option => { option.hidden = !option.dataset.search.includes(query); });
+      picker.querySelectorAll(".am-calc-option-group").forEach(group => { group.hidden = ![...group.querySelectorAll("[data-search]")].some(option => !option.hidden); });
+      picker.querySelector(".am-calc-search-empty").hidden = [...picker.querySelectorAll("[data-search]")].some(option => !option.hidden);
+      return true;
+    }
+    if (model.startsWith("mod-calc.")) {
+      const metric = module.calculatedMetrics.find(metric => metric.key === el.dataset.key);
+      if (!metric) return true;
+      const field = model.slice(9);
+      if (field === "operator") {
+        metric.formula.operator = el.value;
+        el.closest(".am-calc-row").querySelector(".am-calc-sign").textContent = operatorLabel(el.value);
+      } else if (field === "value") metric.formula.right.value = el.value.trim() === "" ? null : Number(el.value);
+      else if (field === "precision") metric.precision = Number(el.value);
+      else if (field === "report") metric.showInReport = el.checked;
+      else metric[field] = el.value;
+      touch(); refreshCalculationIssues(); return true;
+    }
     if (model.startsWith("mod-field.")) {
       const key = model.slice(10);
       if (key.startsWith("context:")) module.context[key.slice(8)] = el.value;
       else module[key] = el.value;
-      touch(); refreshActions(); return true;
+      touch(); if (key === "analysisType") refreshSources(); else refreshActions(); return true;
     }
     if (model === "mod-apps") { module.apps = el.value.split(",").filter(Boolean); touch(); return true; }
     if (model === "mod-option-search") {

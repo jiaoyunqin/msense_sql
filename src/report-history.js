@@ -1,4 +1,5 @@
 import { createReportContent } from "./report-demo-content.js";
+import { createReportDateFilter, matchesReportFilters, normalizeReportStatus, normalizeReportType, reportStatusOptions, reportTypeOptions } from "./report-filters.js";
 import "./report-history.css";
 
 const STORAGE_KEY = "msense-report-followups-v1";
@@ -22,7 +23,7 @@ const REASONING_OPTIONS = [
 const DEFAULT_MODEL = "orange-5.5";
 const DEFAULT_REASONING = "high";
 
-export function mountReportHistory({ main, shell, showToast }) {
+export function mountReportHistory({ main, shell, showToast, extensions = () => null }) {
   const content = createReportContent();
   const { esc, ic, flatSections, findSec, blocksHTML, askBtn, secHTML, tableBlockHTML, renderMD, answer, suggFor } = content;
   const root = document.createElement("section");
@@ -64,12 +65,14 @@ export function mountReportHistory({ main, shell, showToast }) {
     try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify(sessions)); } catch { /* Keep the migrated conversation in memory. */ }
   }
   const tasks = new Map();
-  const filters = { scope: "all", type: "all", time: "all", kw: "" };
+  const filters = { scope: "all", type: "all", status: "all", timeFrom: "", timeTo: "", kw: "" };
+  const dateFilter = createReportDateFilter({ root, filters, icon: ic, onChange: renderCards });
   const narrow = () => window.innerWidth < 1100;
   const session = () => {
-    const s = sessions[report.id] ||= { messages: [], draft: "", quote: "", focusScope: "", topicStart: 0, historyExpanded: false, inlineMigrated: true };
+    const s = sessions[report.id] ||= { messages: [], draft: "", quote: "", quoteScope: "", topicStart: 0, historyExpanded: false, inlineMigrated: true };
     s.messages ||= [];
-    s.focusScope = s.focusScope || (s.scope && s.scope !== "all" ? s.scope : "");
+    if (s.quote && !s.quoteScope) s.quoteScope = s.focusScope || (s.scope && s.scope !== "all" ? s.scope : "");
+    delete s.focusScope;
     s.scope = "all";
     s.topicStart = Number.isInteger(s.topicStart) ? Math.max(0, Math.min(s.topicStart, s.messages.length)) : 0;
     s.historyExpanded = Boolean(s.historyExpanded);
@@ -156,16 +159,18 @@ export function mountReportHistory({ main, shell, showToast }) {
   function render(page, id) {
     if (page === "report" && report?.id === id && !root.hidden) return;
     cancelTasks();
+    dateFilter.close();
     closePopup();
     modelMenuOpen = false;
     reasoningMenuOpen = false;
     shell.classList.remove("has-report-agent");
-    root.classList.remove("detail", "expanded");
+    root.classList.remove("detail", "expanded", "module-report", "agent-hidden");
+    shell.classList.remove("report-agent-hidden");
     root.hidden = !["history", "report"].includes(page);
     report = undefined;
     reportContextTokens = 0;
     if (root.hidden) { root.innerHTML = ""; return; }
-    report = page === "report" ? content.reports[id] : undefined;
+    report = page === "report" ? extensions()?.getReport?.(id) || content.reports[id] : undefined;
     if (page === "report" && !report) {
       root.innerHTML = `<div class="r-empty"><h1>报告不存在</h1><a href="#/history" class="btn-o">${ic("back")}返回过往分析报告</a></div>`;
       return;
@@ -176,7 +181,11 @@ export function mountReportHistory({ main, shell, showToast }) {
     content.state.tabs = {};
     content.state.transposed = {};
     root.classList.add("detail");
+    root.classList.toggle("module-report", Boolean(report.moduleReport));
     shell.classList.add("has-report-agent");
+    if (report.moduleReport) {
+      root.classList.add("agent-hidden"); shell.classList.add("report-agent-hidden");
+    }
     renderReport();
   }
 
@@ -185,8 +194,9 @@ export function mountReportHistory({ main, shell, showToast }) {
       <div class="r-list-actions"><div class="seg" role="group" aria-label="报告范围">${[["mine", "我的"], ["all", "全部"]].map(([value, label]) => `<button data-r-scope="${value}" class="${filters.scope === value ? "on" : ""}" aria-pressed="${filters.scope === value}">${label}</button>`).join("")}</div>
       <button class="btn-o" data-r-refresh>${ic("refresh")}刷新</button></div></header>
       <div class="r-filters" role="search"><label class="r-search">${ic("search")}<input type="search" id="report-search" placeholder="搜索实验 ID / 名称" aria-label="搜索报告或实验 ID" value="${esc(filters.kw)}"></label>
-      ${filterSelect("type", "报告类型", [["all", "全部类型"], ["实验报告", "实验报告"], ["单模块报告", "单模块报告"]])}
-      ${filterSelect("time", "创建时间", [["all", "全部时间"], ["7", "近 7 天"], ["30", "近 30 天"]])}</div><div class="r-cards"></div>`;
+      ${filterSelect("type", "报告类型", reportTypeOptions)}
+      ${filterSelect("status", "报告状态", reportStatusOptions)}
+      ${dateFilter.html()}<button class="r-clear-filters" type="button" data-r-reset>清空筛选</button></div><div class="r-cards"></div>`;
     renderCards();
   }
 
@@ -195,44 +205,68 @@ export function mountReportHistory({ main, shell, showToast }) {
   }
 
   function renderCards() {
-    const kw = filters.kw.trim().toLowerCase();
-    const rows = content.list.filter(r => {
-      const age = (new Date() - new Date(r.created.replace(" ", "T"))) / 864e5;
-      return (filters.scope === "all" || r.owner === "秦娇芸") && (filters.type === "all" || r.type === filters.type)
-        && (filters.time === "all" || age >= 0 && age <= Number(filters.time))
-        && (!kw || `${r.title} ${r.exp} ${r.libra} ${r.qx}`.toLowerCase().includes(kw));
-    });
-    $(".r-cards").innerHTML = rows.length ? rows.map(r => `<article class="rcard">
+    const rows = [...(extensions()?.getList?.() || []), ...content.list].filter(r => matchesReportFilters(r, filters));
+    $(".r-cards").innerHTML = rows.length ? rows.map(r => {
+      const status = normalizeReportStatus(r), href = r.href || `#/report/${r.rid}`;
+      return `<article class="rcard" data-report-status="${status}">
       <span class="rcard-icon">${ic("file", 20)}</span><div class="rcard-copy">
-      <a class="rcard-link" href="#/report/${r.rid}"><strong>${esc(r.title)}</strong><span>实验名称：${esc(r.exp)}</span></a>
-      <p class="rcard-type">${esc(r.type)} · 实验 ID ${esc(r.libra)} · 钱效平台 ID ${esc(r.qx)}</p>
-      <div class="rcard-meta"><span class="r-owner"><span class="r-avatar">${esc(r.owner[0])}</span>${esc(r.owner)}</span><time>创建时间：${esc(r.created)}</time><time>生成时间：${esc(r.generated)}</time></div></div>
-      <a href="#/report/${r.rid}" class="r-view-link">查看报告${ic("side", 14)}</a></article>`).join("")
+      <a class="rcard-link" href="${esc(href)}"><strong>${esc(r.title)}<span class="r-report-state ${status}">${reportStatusOptions.find(([key]) => key === status)?.[1]}</span></strong><span>实验名称：${esc(r.exp)}</span></a>
+      <p class="rcard-type">${esc(normalizeReportType(r.type))} · 实验 ID ${esc(r.libra)} · ${r.multi ? "模拟数据" : `钱效平台 ID ${esc(r.qx)}`}</p>
+      <div class="rcard-meta"><span class="r-owner"><span class="r-avatar">${esc(r.owner[0])}</span>${esc(r.owner)}</span><time>创建时间：${esc(r.created)}</time>${r.generated ? `<time>生成时间：${esc(r.generated)}</time>` : ""}</div></div>
+      <a href="${esc(href)}" class="r-view-link">${r.taskOnly ? "查看任务" : "查看报告"}${ic("side", 14)}</a></article>`; }).join("")
       : `<div class="r-empty">${ic("search", 24)}<p>没有符合条件的报告</p><button class="btn-o" data-r-reset>重置筛选</button></div>`;
   }
 
   function renderReport() {
     const summary = report.summary;
-    root.innerHTML = `<div class="r-reading"><div class="r-report-toolbar"><a href="#/history">${ic("back")}过往分析报告</a><span>${esc(report.kind)}</span></div>
+    const customBody = extensions()?.renderBody?.(report);
+    root.innerHTML = `<div class="r-reading"><div class="r-report-toolbar"><a href="#/history">${ic("back")}过往分析报告</a><span>${esc(normalizeReportType(report.kind))}</span></div>
       <div id="view" tabindex="-1"><div class="rlayout">${content.tocHTML(report)}
-      <article class="report" id="report" aria-label="分析报告正文"><header class="rhead"><p class="eyebrow">实验分析报告</p><h1>${esc(report.title)}</h1>
+      <article class="report" id="report" aria-label="分析报告正文">${customBody ?? `<header class="rhead"><p class="eyebrow">实验分析报告</p><h1>${esc(report.title)}</h1>
       <dl class="meta">${report.meta.map(([label, value]) => `<div><dt>${esc(label)}</dt><dd title="${esc(value)}">${esc(value)}</dd></div>`).join("")}</dl></header>
       ${summary ? `<section class="sec" id="sec-${summary.id}" data-sec="${summary.id}"><div class="ccard" data-card="${summary.id}"><div class="ccard-h"><span class="t">${ic("chart")}${esc(summary.title)}</span><span class="grow"></span>${askBtn(summary.id)}</div>
       <p class="lead">${esc(summary.lead)}</p>${blocksHTML(summary.blocks)}</div></section>` : ""}
-      ${flatSections(report).map(secHTML).join("")}</article></div></div></div>
+      ${flatSections(report).map(secHTML).join("")}`}</article></div></div></div>
       <aside class="ai" id="ai" aria-label="报告追问助手"><div class="ai-h"><span class="mark">${ic("sparkles", 14)}</span><strong>报告追问</strong><span class="grow"></span>
       <button class="ai-new-topic" id="aiNew" title="开启新话题" aria-label="开启新话题">${ic("newchat", 14)}<span>开启新话题</span></button>
       <button class="icon-btn" id="aiWide" title="加宽对话框" aria-label="加宽对话框" aria-pressed="false">${ic("expand")}</button>
+      ${report.moduleReport ? `<button class="icon-btn" id="aiHide" type="button" aria-label="收起报告助手">${ic("side")}</button>` : ""}
       <button class="icon-btn" id="aiFold" aria-label="展开对话" aria-expanded="false">${ic("chevup")}</button></div>
       <div class="ai-ctx">${ic("file")}<div><small>上下文选取整份报告的全部内容</small><b title="${esc(report.title)}">${esc(report.title)}</b></div></div>
       <div class="ai-msgs" id="aiMsgs" role="log" aria-label="报告追问对话记录" aria-live="polite" aria-relevant="additions"></div>
-      <form class="ai-in" id="aiForm"><div class="box"><div id="aiFocus"></div><div id="aiQuote"></div><textarea id="aiText" rows="2" aria-label="向报告助手提问" placeholder="针对这份报告提问…">${esc(session().draft)}</textarea>
+      <form class="ai-in" id="aiForm"><div class="box"><div id="aiQuote"></div><textarea id="aiText" rows="2" aria-label="向报告助手提问" placeholder="针对这份报告提问…">${esc(session().draft)}</textarea>
       <div class="box-f"><div class="ai-config" id="aiConfig"></div><button class="send" id="aiSend" type="submit" aria-label="发送">${ic("up")}</button></div></div><small class="r-input-hint">Enter 发送 · Shift+Enter 换行</small></form></aside>
-      <button class="sel-ask" id="selAsk" hidden>${ic("sparkles", 14)}追问这段</button>`;
+      <button class="sel-ask" id="selAsk" hidden>${ic("sparkles", 14)}追问这段</button>
+      ${report.moduleReport ? `<button class="mm-agent-launcher" id="aiShow" type="button" aria-label="打开报告助手">${ic("sparkles", 18)}<span>AI</span></button>` : ""}`;
     renderAgent(); autoGrow();
     $("#view").addEventListener("scroll", () => { syncToc(); positionPopup(); positionSelection(); }, { passive: true });
     syncToc();
   }
+  function refreshBody(change = null) {
+    const html = report && extensions()?.renderBody?.(report);
+    if (html == null || !$("#report")) return;
+    closePopup();
+    const container = document.createElement("div"); container.innerHTML = html;
+    const current = change?.moduleId && $(`[data-mm-section="${change.moduleId}"]`);
+    const replacement = change?.moduleId && container.querySelector(`[data-mm-section="${change.moduleId}"]`);
+    if (current && replacement) {
+      const top = $("#view").scrollTop;
+      const fullscreenId = current.querySelector(".tblock.fs")?.id;
+      const expandedNotes = [...current.querySelectorAll("details")].map(details => details.open);
+      current.replaceWith(replacement);
+      if (fullscreenId) {
+        const fullscreen = replacement.querySelector(`#${fullscreenId}`);
+        fullscreen?.classList.add("fs");
+        fullscreenAnchor = fullscreen?.querySelector("[data-fs]");
+        if (!fullscreen) $(".fs-mask")?.remove();
+      }
+      replacement.querySelectorAll("details").forEach((details, index) => { details.open = expandedNotes[index] || false; });
+      $("#view").scrollTop = top;
+    } else $("#report").replaceChildren(...container.childNodes);
+    if (change?.focus) $(change.focus)?.focus({ preventScroll: true });
+    syncToc();
+  }
+  const suggestions = scope => extensions()?.suggestions?.(report, scope) || suggFor(scope);
 
   function turnHTML(turn, index) {
     if (turn.role === "user") return `<div class="msg u">${turn.quote ? `<blockquote class="qref">${esc(turn.quote)}</blockquote>` : ""}<div class="bubble">${esc(turn.q)}</div>
@@ -247,13 +281,12 @@ export function mountReportHistory({ main, shell, showToast }) {
   function recommendationsHTML() {
     return `<section class="ai-recs" aria-label="整份报告推荐追问">
       <div class="ai-recs-h"><span>推荐问题</span></div>
-      ${suggFor(null).map(q => `<button class="sugg" data-q="${esc(q)}" data-q-scope="all">${ic("sparkles", 14)}${esc(q)}</button>`).join("")}</section>`;
+      ${suggestions(null).map(q => `<button class="sugg" data-q="${esc(q)}" data-q-scope="all">${ic("sparkles", 14)}${esc(q)}</button>`).join("")}</section>`;
   }
 
   function renderAgent({ focusHistory = false } = {}) {
     if (!report || !$("#aiMsgs")) return;
     const s = session(), pane = $("#aiMsgs");
-    if (s.focusScope && !findSec(report, s.focusScope)) s.focusScope = "";
     const history = s.messages.slice(0, s.topicStart);
     const current = s.messages.slice(s.topicStart);
     const historyHTML = history.length ? `<section class="ai-history" aria-label="最近对话记录">
@@ -265,9 +298,7 @@ export function mountReportHistory({ main, shell, showToast }) {
       : `<div class="ai-empty"><span class="mark">${ic("sparkles", 14)}</span><h3>${history.length ? "已开启新话题" : "对这份报告有什么想问的？"}</h3>
       <p>${history.length ? "之前的对话已保留在上方，可以继续针对这份报告提问。" : "可以总结结论、对比实验组、解释指标，或讨论下一步策略。点击回答中的引用可查看报告原文。"}</p></div>`;
     pane.innerHTML = historyHTML + currentHTML + (!current.length ? recommendationsHTML() : "");
-    $("#aiFocus").innerHTML = s.focusScope ? `<div class="focus-chip">${ic("target", 12)}<span>关注：${esc(scopeLabel(s.focusScope))}</span><button type="button" data-remove-focus aria-label="清除关注模块">${ic("x", 12)}</button></div>` : "";
     $("#aiQuote").innerHTML = s.quote ? `<div class="qchip">${ic("quote", 12)}<span>${esc(s.quote)}</span><button type="button" data-remove-quote aria-label="移除引用">${ic("x", 12)}</button></div>` : "";
-    $("#aiText").placeholder = s.focusScope ? `针对「${scopeLabel(s.focusScope)}」提问…` : "针对这份报告提问…";
     $$("[data-ask]").forEach(button => {
       const active = popup?.dataset.scope === button.dataset.ask;
       button.classList.toggle("on", active);
@@ -294,13 +325,13 @@ export function mountReportHistory({ main, shell, showToast }) {
     };
     const delay = ms => new Promise(resolve => window.setTimeout(resolve, ms));
     try {
-      const result = answer(turn.q, turn.scope, turn.quote);
+      const result = extensions()?.answer?.(report, turn.q, turn.scope, turn.quote) || answer(turn.q, turn.scope, turn.quote);
       tick(); save();
       for (const step of result.steps || []) {
         if (task.cancelled) return;
         turn.step = step + "…"; tick(); await delay(180);
       }
-      const tokens = result.md.match(/\[\[cite:[^\]]+\]\]|.{1,28}|\n/g) || [];
+      const tokens = report?.custom ? [result.md] : result.md.match(/\[\[cite:[^\]]+\]\]|.{1,28}|\n/g) || [];
       for (const token of tokens) {
         if (task.cancelled) return;
         turn.md = (turn.md || "") + token; tick(); await delay(18);
@@ -328,11 +359,11 @@ export function mountReportHistory({ main, shell, showToast }) {
     const q = String(question || "").trim();
     if (!q || !report || tasks.has(taskKey("chat"))) return;
     const s = session();
-    const scope = findSec(report, requestedScope) ? requestedScope : findSec(report, s.focusScope) ? s.focusScope : "all";
+    const requested = extensions()?.normalizeScope?.(report, requestedScope || s.quoteScope) || requestedScope || s.quoteScope;
+    const scope = findSec(report, requested) ? requested : "all";
     const turn = { role: "assistant", q, scope, quote: s.quote, model: s.model, reasoning: s.reasoning, md: "", done: false };
     s.messages.push({ role: "user", q, scope, quote: s.quote }, turn);
-    s.focusScope = scope === "all" ? "" : scope;
-    s.draft = ""; s.quote = ""; $("#aiText").value = ""; autoGrow();
+    s.draft = ""; s.quote = ""; s.quoteScope = ""; $("#aiText").value = ""; autoGrow();
     modelMenuOpen = false;
     reasoningMenuOpen = false;
     if (narrow()) setExpanded(true);
@@ -341,6 +372,13 @@ export function mountReportHistory({ main, shell, showToast }) {
 
   function openPopup(button, scope) {
     if (!findSec(report, scope)) return;
+    if (report.moduleReport) {
+      root.classList.remove("agent-hidden"); shell.classList.remove("report-agent-hidden");
+      const section = $(`#sec-${scope}`);
+      session().quote = section?.querySelector(".mm-conclusion > ul")?.textContent?.trim().slice(0, 400) || findSec(report, scope).title;
+      session().quoteScope = scope; save(); renderAgent(); if (narrow()) setExpanded(true);
+      $("#aiText").focus({ preventScroll: true }); return;
+    }
     if (popup?.dataset.scope === scope) { closePopup(true); return; }
     closePopup();
     modelMenuOpen = false;
@@ -354,7 +392,7 @@ export function mountReportHistory({ main, shell, showToast }) {
     popup.setAttribute("aria-label", `追问${scopeLabel(scope)}`);
     const busy = tasks.has(taskKey("chat"));
     popup.innerHTML = `<div class="pop-h">${ic("sparkles", 14)}<span>追问「${esc(scopeLabel(scope))}」</span><button type="button" class="icon-btn" data-close-popup aria-label="关闭追问">${ic("x", 14)}</button></div>
-      ${suggFor(scope).map(q => `<button type="button" class="pop-q" data-pq="${esc(q)}" ${busy ? "disabled" : ""}>${esc(q)}</button>`).join("")}
+      ${suggestions(scope).map(q => `<button type="button" class="pop-q" data-pq="${esc(q)}" ${busy ? "disabled" : ""}>${esc(q)}</button>`).join("")}
       <form class="pop-in"><input placeholder="请输入问题" aria-label="输入模块追问" autocomplete="off"><button type="submit" disabled>提问</button></form>`;
     root.append(popup);
     button.classList.add("on");
@@ -401,6 +439,8 @@ export function mountReportHistory({ main, shell, showToast }) {
   }
 
   function gotoSection(scope, block) {
+    const change = extensions()?.beforeGoto?.(report, scope);
+    if (change) { scope = change.scope || scope; refreshBody(change); }
     const section = $(`#sec-${scope}`);
     const target = block ? section?.querySelector(`[data-bid="${block}"]`) || section : section;
     if (!target) return;
@@ -412,7 +452,7 @@ export function mountReportHistory({ main, shell, showToast }) {
   }
 
   function syncToc() {
-    const sections = $$(".sec");
+    const sections = $$(".sec").filter(section => !section.hidden);
     let current = sections[0]?.dataset.sec;
     sections.forEach(el => { if (el.getBoundingClientRect().top < 180) current = el.dataset.sec; });
     $$(".toc-item").forEach(el => {
@@ -444,6 +484,8 @@ export function mountReportHistory({ main, shell, showToast }) {
     }
   });
   root.addEventListener("change", e => {
+    const change = extensions()?.handleEvent?.(e, report);
+    if (change) { refreshBody(change); return; }
     if (e.target.dataset.rFilter) { filters[e.target.dataset.rFilter] = e.target.value; renderCards(); }
   });
   root.addEventListener("submit", e => {
@@ -452,9 +494,18 @@ export function mountReportHistory({ main, shell, showToast }) {
     if (e.target.matches(".pop-in")) askFromPopup(e.target.querySelector("input")?.value);
   });
   root.addEventListener("click", e => {
+    const change = extensions()?.handleEvent?.(e, report);
+    if (change) { refreshBody(change); return; }
     const button = e.target.closest("button");
     if (!button) return;
     const d = button.dataset;
+    if (button.id === "aiShow" || button.id === "aiHide") {
+      const hidden = button.id === "aiHide";
+      root.classList.toggle("agent-hidden", hidden); shell.classList.toggle("report-agent-hidden", hidden);
+      if (!hidden) { if (narrow()) setExpanded(true); $("#aiText").focus({ preventScroll: true }); }
+      else $("#aiShow")?.focus({ preventScroll: true });
+      return;
+    }
     if (button.id === "aiModelToggle") {
       modelMenuOpen = !modelMenuOpen;
       reasoningMenuOpen = false;
@@ -486,7 +537,7 @@ export function mountReportHistory({ main, shell, showToast }) {
     }
     if (d.rScope) { filters.scope = d.rScope; renderList(); }
     if ("rRefresh" in d) { renderCards(); showToast("已刷新报告列表"); }
-    if ("rReset" in d) { Object.assign(filters, { scope: "all", type: "all", time: "all", kw: "" }); renderList(); }
+    if ("rReset" in d) { dateFilter.close(); Object.assign(filters, { type: "all", status: "all", timeFrom: "", timeTo: "", kw: "" }); renderList(); }
     if (d.ask) openPopup(button, d.ask);
     if ("closePopup" in d) closePopup(true);
     if (d.pq) askFromPopup(d.pq);
@@ -503,8 +554,7 @@ export function mountReportHistory({ main, shell, showToast }) {
     }
     if (d.fs) toggleFullscreen(d.fs, button);
     if ("closeFullscreen" in d) closeFullscreen();
-    if ("removeQuote" in d) { session().quote = ""; save(); renderAgent(); }
-    if ("removeFocus" in d) { session().focusScope = ""; save(); renderAgent(); }
+    if ("removeQuote" in d) { session().quote = ""; session().quoteScope = ""; save(); renderAgent(); }
     if ("historyToggle" in d) {
       session().historyExpanded = !session().historyExpanded;
       save(); renderAgent({ focusHistory: true });
@@ -514,7 +564,7 @@ export function mountReportHistory({ main, shell, showToast }) {
       if (s.topicStart === s.messages.length) {
         showToast("当前已经是新话题");
       } else {
-        Object.assign(s, { topicStart: s.messages.length, historyExpanded: false, focusScope: "", scope: "all", quote: "", draft: "" });
+        Object.assign(s, { topicStart: s.messages.length, historyExpanded: false, scope: "all", quote: "", quoteScope: "", draft: "" });
         $("#aiText").value = ""; autoGrow(); save(); renderAgent({ focusHistory: true });
         showToast("已开启新话题，之前的对话可向上查看");
       }
@@ -588,7 +638,7 @@ export function mountReportHistory({ main, shell, showToast }) {
     const button = e.target.closest("#selAsk");
     if (!button) return;
     session().quote = button.dataset.quote;
-    session().focusScope = button.dataset.quoteScope;
+    session().quoteScope = button.dataset.quoteScope;
     button.hidden = true;
     window.getSelection()?.removeAllRanges(); save(); renderAgent();
     if (narrow()) setExpanded(true);
@@ -598,5 +648,5 @@ export function mountReportHistory({ main, shell, showToast }) {
     closePopup();
     if ($("#selAsk")) $("#selAsk").hidden = true;
   });
-  return { render };
+  return { render, refreshBody, refreshList: () => { if (!root.hidden && !report && $(".r-cards")) renderCards(); } };
 }

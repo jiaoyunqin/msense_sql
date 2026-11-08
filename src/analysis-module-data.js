@@ -1,13 +1,22 @@
 import { clone, uid, hash, defaultContext, currentActor, businessGoal } from "./composer-data.js";
+import { comparisonMetrics } from "./multi-experiment-data.js";
+import { templateReferenceModules } from "./report-template-reference-data.js";
+import {
+  calculationCandidatesFor, resolveCalculationMetricFor, validateCalculatedMetrics,
+  newCalculatedMetric, calculationMetricRef
+} from "./analysis-module-calculations.js";
+export { newCalculatedMetric, calculationMetricRef, metricReferenceKey } from "./analysis-module-calculations.js";
 
-const fields = (rows, prefix) => rows.map(([name, description], index) => ({
-  key: `${prefix}_${index}`, name, description: description || "", type: "number", role: "metric"
+const fields = (rows, prefix) => rows.map(([name, description, semanticType = "number"], index) => ({
+  key: `${prefix}_${index}`, name, description: description || "",
+  type: semanticType === "text" ? "string" : "number", role: "metric",
+  ...(semanticType !== "number" ? { semanticType, calculable: false } : {})
 }));
 const coreMetrics = fields([
   ["进组用户数", "进组去重用户数"],
   ["支付转化率", "实验期间，大盘累计支付用户数 / 进组用户数"],
   ["支付转化率增幅", "实验组支付转化率 / 对照组支付转化率 − 1"],
-  ["支付转化率显著性", "显著性水平 5%"],
+  ["支付转化率显著性", "显著性水平 5%", "significance"],
   ["增量支付用户数", "（实验组支付转化率 − 对照组支付转化率）× 实验组进组用户数"],
   ["人均支付订单数", "实验期间，累计支付订单数 / 进组用户数"],
   ["人均支付 GMV", "实验期间，累计支付 GMV / 进组用户数"],
@@ -45,12 +54,16 @@ const couponMetrics = fields([
   ["券补贴金额", "已核销优惠券对应的补贴金额"]
 ], "coupon");
 export const moduleBuiltins = [
+  { id: "demo-comparison", name: "独立实验核心指标（模拟）", description: "逐实验获取自身对照组和策略组，不合并不同实验的数据。",
+    metrics: comparisonMetrics.map(metric => ({ ...metric, role: "metric", type: "number",
+      description: "本地模拟口径；以当前实验自身对照组计算。" })),
+    dimensions: [{ key: "overall", name: "整体" }, { key: "demo-spend", name: "消费力分层（模拟）" }] },
   { id: "experiment-config", name: "实验背景与配置", description: "查询实验基本信息与营销配置。",
     metrics: fields([
-      ["实验时间", "实验的开始日期和结束日期"], ["实验流量", "当前实验组分配的流量比例"],
-      ["发券面额", "实验组配置的券面额或券包内容"], ["发券时效", "优惠券领取后的有效期规则"],
-      ["券可用范围", "优惠券允许使用的范围"], ["领取次数", "同一用户允许领取的次数"],
-      ["发券点位", "优惠券的投放入口"]
+      ["实验时间", "实验的开始日期和结束日期", "text"], ["实验流量", "当前实验组分配的流量比例"],
+      ["发券面额", "实验组配置的券面额或券包内容", "text"], ["发券时效", "优惠券领取后的有效期规则", "text"],
+      ["券可用范围", "优惠券允许使用的范围", "text"], ["领取次数", "同一用户允许领取的次数"],
+      ["发券点位", "优惠券的投放入口", "text"]
     ], "experiment"), dimensions: [] },
   { id: "pre-aa", name: "PreAA指标", description: "查看实验启动前的指标，核对实验组与对照组的均衡情况。",
     metrics: fields([["PreAA GMV", "实验启动前的累计支付金额"], ["PreAA 订单量", "实验启动前的支付订单数"],
@@ -83,7 +96,11 @@ export function sqlSource(ability, version, selections = null) {
     showInReport: true, expanded: false };
 }
 export function sourceDefinition(store, source) {
-  if (source.kind === "rpc") return source.definition || moduleBuiltins.find((entry) => entry.id === source.capabilityId);
+  if (source.kind === "rpc") {
+    const definition = source.definition || (source.version === 1 && moduleBuiltins.find((entry) => entry.id === source.capabilityId));
+    return definition?.id === source.capabilityId && (definition.version ?? 1) === source.version ? definition : null;
+  }
+  if (source.kind !== "sql") return null;
   const version = store.abilities.find((ability) => ability.id === source.capabilityId)?.versions.find((v) => v.number === source.version);
   if (!version) return null;
   const metrics = [...new Map(version.modes.flatMap((mode) => mode.fields.filter((f) => f.role === "metric")).map((f) => [f.key, f])).values()];
@@ -97,18 +114,28 @@ export function sourceDefinition(store, source) {
 }
 export function newAnalysisModule() {
   return { id: uid("module"), name: "", description: "", goal: businessGoal, apps: [],
-    createdBy: currentActor, capabilityId: "", version: 0, selections: {}, sources: [],
+    analysisType: "single",
+    createdBy: currentActor, capabilityId: "", version: 0, selections: {}, sources: [], calculatedMetrics: [],
     reasoning: "", considerations: "", context: clone(defaultContext), scenario: "normal",
     savedAt: "", updatedAt: "", attempts: [], versions: [], enabled: true, archived: false };
 }
 export function moduleConfiguration(module) {
   return clone({
     name: module.name, description: module.description, goal: businessGoal, apps: module.apps,
+    analysisType: module.analysisType || "single",
     sources: module.sources.map(({ expanded, ...source }) => source),
-    reasoning: module.reasoning, considerations: module.considerations
+    reasoning: module.reasoning, considerations: module.considerations,
+    // Omit empty definitions to preserve legacy configuration/trial hashes exactly.
+    ...(module.calculatedMetrics != null && (!Array.isArray(module.calculatedMetrics) || module.calculatedMetrics.length)
+      ? { calculatedMetrics: module.calculatedMetrics } : {})
   });
 }
-export const moduleHash = (module) => hash(moduleConfiguration(module));
+export const moduleHash = (module) => {
+  const configuration = moduleConfiguration(module);
+  // Keep unchanged legacy single-experiment signatures valid.
+  if (configuration.analysisType === "single") delete configuration.analysisType;
+  return hash(configuration);
+};
 export function moduleState(module) {
   if (!module.versions.length) return "draft";
   return module.enabled === false ? "offline" : "online";
@@ -146,8 +173,79 @@ export function initializeModules(store) {
     }
     store.analysisModuleSeeded = true;
   }
+  if (!store.multiModuleSeeded) {
+    for (const [id, name, type, source] of [
+      ["multi-core", "跨实验 · 核心表现对比", "multi", "demo-comparison"],
+      ["multi-strategy", "跨实验 · 策略配置差异", "multi", "experiment-config"],
+      ["multi-detail", "跨实验 · 单实验证据核对", "multi", "demo-comparison"],
+      ["single-demo-core", "单实验 · 核心指标（模拟）", "single", "demo-comparison"]
+    ]) {
+      const module = newAnalysisModule();
+      Object.assign(module, { id, name, analysisType: type, description: "多实验分析 Demo 配套模块，使用虚拟实验数据。",
+        sources: [builtinSource(source, true, id === "multi-detail" ? "" : source === "demo-comparison" ? "整体" : "")], savedAt: "2026-11-05T02:00:00Z", updatedAt: "2026-11-05T02:00:00Z",
+        reasoning: type === "multi" ? "逐实验核对自身对照组，比较策略的指标表现与配置差异，再说明观察窗口和人群差异。"
+          : "比较本实验策略组相对自身对照组的表现。",
+        considerations: "不直接合计跨实验指标，不推断跨实验统计显著性，不将配置差异作为确定因果。" });
+      module.versions.push({ number: 1, publishedAt: module.savedAt, operator: currentActor,
+        signature: moduleHash(module), configuration: moduleConfiguration(module) });
+      if (!store.modules.some(entry => entry.id === id)) store.modules.push(module);
+    }
+    store.multiModuleSeeded = true;
+  }
+  if (!store.calculatedModuleDemoSeeded) {
+    for (const [id, name, type, capabilityId, left, right, format] of [
+      ["calculated-metrics-demo", "计算指标 · 领券核销", "single", "coupon-overall", "coupon_2", "coupon_0", "percent"],
+      ["multi-calculated-demo", "计算指标 · 多实验", "multi", "demo-comparison", "gmv", "dac", "number"]
+    ]) {
+      if (store.modules.some(module => module.id === id)) continue;
+      const module = newAnalysisModule(), source = builtinSource(capabilityId);
+      source.metricKeys = [left, right];
+      const calculation = newCalculatedMetric();
+      Object.assign(calculation, { name: type === "single" ? "用户核销率" : "每支付天 GMV", format });
+      calculation.formula.left = calculationMetricRef(source, left);
+      calculation.formula.right = calculationMetricRef(source, right);
+      Object.assign(module, { id, name, analysisType: type, sources: [source], calculatedMetrics: [calculation],
+        description: type === "single" ? "使用领券核销指标计算用户核销率。" : "分别计算各实验整体与消费力分层的每支付天 GMV。",
+        reasoning: "分别核对各分组原始指标和计算结果，保留缺失原因。",
+        considerations: "本地模拟数据；计算结果不附加显著性，也不跨实验混算。",
+        savedAt: "2026-11-08T12:00:00Z", updatedAt: "2026-11-08T12:00:00Z" });
+      if (type === "multi") module.versions.push({ number: 1, publishedAt: module.savedAt, operator: currentActor,
+        signature: moduleHash(module), configuration: moduleConfiguration(module) });
+      store.modules.push(module);
+    }
+    store.calculatedModuleDemoSeeded = true;
+  }
+  if (!store.templateReferenceModulesSeeded) {
+    const additions = [];
+    for (const fixture of templateReferenceModules) {
+      if (store.modules.some(module => module.id === fixture.id)) continue;
+      const module = newAnalysisModule();
+      const metrics = fixture.metrics.map(([key, name, semanticType]) => ({
+        key, name, description: "", role: "metric", type: semanticType ? "string" : "number",
+        ...(semanticType ? { semanticType, calculable: false } : {})
+      }));
+      const dimensions = [{ key: "overall", name: "整体（不拆分）" },
+        ...fixture.dimensions.map((name, index) => ({ key: `reference_dimension_${index}`, name }))];
+      const source = { id: uid("source"), kind: "rpc", capabilityId: fixture.source, version: 1,
+        definition: { id: fixture.source, name: fixture.name, description: fixture.description || "", metrics, dimensions },
+        metricKeys: metrics.map(metric => metric.key), dimensionKeys: dimensions.map(dimension => dimension.key),
+        showInReport: true, expanded: false };
+      Object.assign(module, { id: fixture.id, name: fixture.name, description: fixture.description || "",
+        apps: ["抖音", "极速版"], sources: [source], reasoning: "比较实验组与自身对照组的指标表现，结合所选维度分析差异。",
+        savedAt: "2026-11-08T12:00:00Z", updatedAt: "2026-11-08T12:00:00Z" });
+      for (let number = 1; number <= (fixture.version || 1); number++) {
+        module.versions.push({ number, publishedAt: module.savedAt, operator: currentActor,
+          signature: moduleHash(module), configuration: moduleConfiguration(module) });
+      }
+      additions.push(module);
+    }
+    store.modules.unshift(...additions);
+    store.templateReferenceModulesSeeded = true;
+  }
   for (const module of store.modules) {
+    module.analysisType ||= "single";
     module.sources ||= []; module.versions ||= []; module.attempts ||= []; module.apps ||= [];
+    module.calculatedMetrics ??= [];
     module.context ||= clone(defaultContext); module.goal = businessGoal;
     for (const attempt of module.attempts) if (attempt.status === "running") {
       attempt.status = "insufficient"; attempt.error = "页面重载中断了试跑，请重新运行。";
@@ -171,8 +269,43 @@ export function attachAnalysisVersion(store, ability, number) {
     mode.fields.filter((field) => field.role === "metric").map((field) => field.key)]));
   source.expanded = true;
 }
-export function moduleIssues(store, module, sources = module.sources) {
+export function calculationCandidates(store, module) {
+  return calculationCandidatesFor(module, source => sourceDefinition(store, source));
+}
+export function resolveCalculationMetric(store, module, ref, options) {
+  return resolveCalculationMetricFor(module, ref, source => sourceDefinition(store, source), options);
+}
+export function calculatedMetricIssues(store, module, key) {
+  return validateCalculatedMetrics(module, source => sourceDefinition(store, source), key);
+}
+export function includeCalculationDependency(store, module, ref) {
+  const { candidate, issues } = resolveCalculationMetric(store, module, ref, { requireSelected: false });
+  if (issues.length) throw new Error(issues.map(issue => issue.message).join(" "));
+  const source = module.sources.find(source => source.id === ref.sourceId);
+  const added = !candidate.selected;
+  if (added) (source.metricKeys ||= []).push(ref.key);
+  return { added, sourceId: source.id, key: ref.key };
+}
+// Use the returned fields when copying a module; histories stay with the original.
+export function copyModuleSources(module) {
+  const sources = structuredClone(module.sources || []), sourceIdMap = new Map();
+  for (const source of sources) {
+    if (sourceIdMap.has(source.id)) throw new Error("取数来源身份重复，无法复制。");
+    sourceIdMap.set(source.id, uid("source")); source.id = sourceIdMap.get(source.id);
+  }
+  const calculatedMetrics = structuredClone(module.calculatedMetrics ?? []);
+  if (Array.isArray(calculatedMetrics)) for (const metric of calculatedMetrics) {
+    for (const operand of [metric?.formula?.left, metric?.formula?.right]) {
+      if (operand?.type === "metric" && sourceIdMap.has(operand.sourceId))
+        operand.sourceId = sourceIdMap.get(operand.sourceId);
+    }
+  }
+  return { sources, calculatedMetrics, sourceIdMap };
+}
+export function moduleIssues(store, module, sources = module.sources, { sourceTrial = false } = {}) {
   const issues = [];
+  if (!["single", "multi"].includes(module.analysisType || "single")) issues.push("请选择分析类型。");
+  if (module.analysisType === "multi" && !module.reasoning.trim()) issues.push("请说明跨实验分析思路。");
   if (!module.name.trim()) issues.push("请填写模块名称。");
   if (!sources.length) issues.push("请选择取数模块。");
   for (const source of sources) {
@@ -193,5 +326,6 @@ export function moduleIssues(store, module, sources = module.sources) {
         issues.push(`${definition.name}：部分指标没有对应的取数模式。`);
     }
   }
+  if (!sourceTrial) issues.push(...calculatedMetricIssues(store, module).map(issue => issue.message));
   return [...new Set(issues)];
 }

@@ -3,7 +3,7 @@ import { metricFields } from "./composer-metrics.js";
 
 export const sourceLabels = {
   builtin_rpc: ["内置 RPC", "blue"],
-  builtin_sql: ["内置 SQL", "green"],
+  builtin_sql: ["内置 SQL", "amber"],
   custom_sql: ["自定义 SQL", "purple"]
 };
 export const stateLabels = {
@@ -16,7 +16,7 @@ function content(definition) {
     return {
       key: definition.key, name: definition.name, description: definition.description,
       kind: definition.kind, source: sourceType(definition),
-      sql: d.sql, entity: d.entity, entityColumn: d.entityColumn, sourceAlias: d.sourceAlias,
+      sql: d.sql, overallSql: d.overallSql || "", entity: d.entity, entityColumn: d.entityColumn, sourceAlias: d.sourceAlias,
       dimensionKey: d.dimensionKey, dimensionName: d.dimensionName, idAlias: d.idAlias,
       valueAlias: d.valueAlias, valueType: d.valueType, timing: d.timing, enumValues: d.enumValues || [],
       fields: d.fields.map((f) => ({
@@ -93,7 +93,8 @@ export function catalogSearchText(store, obj) {
   }
   return terms.join(" ").toLocaleLowerCase("zh-CN");
 }
-export function matchesCatalog(store, obj, { search = "", source = "all", goal = "all", state = "all" } = {}) {
+export function matchesCatalog(store, obj, { search = "", source = "all", goal = "all", state = "all", creator = "all" } = {}) {
+  if (creator !== "all" && obj.createdBy !== creator) return false;
   if (source !== "all" && sourceType(obj) !== source) return false;
   if (goal !== "all" && obj.goal !== goal) return false;
   const publication = catalogPublicationState(store, obj);

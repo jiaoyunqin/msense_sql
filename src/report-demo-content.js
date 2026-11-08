@@ -238,7 +238,7 @@ function findSec(rep, id) {
 function tocHTML(rep) {
   return `<nav class="toc" aria-label="报告目录"><div class="toc-inner">${rep.sections.map(s => {
     if (!s.group) return `<button class="toc-item" data-goto="${s.id}"><span>${s.no}</span><span>${esc(s.title)}</span></button>`;
-    return `<button class="toc-item" data-goto="${s.children[0].id}"><span>${s.no}</span><span>${esc(s.title)}</span></button><div class="toc-sub">${s.children.map(c => `<button class="toc-item" data-goto="${c.id}"><span>${c.no}</span><span>${esc(c.short)}</span></button>`).join('')}</div>`;
+    return `<button class="toc-item" data-goto="${s.children[0].id}" title="${esc(s.title)}"><span>${s.no}</span><span>${esc(s.title)}</span></button><div class="toc-sub">${s.children.filter(c => !c.hiddenToc).map(c => `<button class="toc-item" data-goto="${c.id}" title="${esc(c.short)}"><span>${c.no}</span><span>${esc(c.short)}</span></button>`).join('')}</div>`;
   }).join('')}</div></nav>`;
 }
 function askBtn(id, label = '继续追问') { return `<button class="ask-btn" data-ask="${id}">${ic('sparkles', 13)}${label}</button>`; }

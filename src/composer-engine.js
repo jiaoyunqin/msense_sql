@@ -296,7 +296,7 @@ function singleSqlModes(ability) {
     ]),
     parameters: mergedBindings([source]), sourceDefinitions: clone([source])
   });
-  const modes = [createMode(`${source.id}__overall`, "整体", [], singleSqlSplitSQL(source))];
+  const modes = [createMode(`${source.id}__overall`, "整体", [], source.draft.overallSql || singleSqlSplitSQL(source))];
   for (const dimension of dimensions) {
     modes.push(createMode(`${source.id}__${dimension.key}`, dimension.name, [dimension.key],
       dimension.splitSql || singleSqlSplitSQL(source, [dimension.key])));
