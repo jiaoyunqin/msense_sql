@@ -557,18 +557,27 @@ check("引用保留大表格方向及已选组，只恢复被引用的隐藏列"
   assert(!answer.includes("DEMO-001"));
 });
 
-check("新报告目录可定位逐实验结论及直接展开的指标表，不切换报告样式", () => {
+check("新报告目录仅展示一个单实验分析结论入口，保留各实验引用及指标表定位", () => {
   const report = descriptor(fresh()), view = {};
   renderMultiReport(report, view);
   const { module, state } = stateFor(report, view, 1);
   const children = report.sections[1].children;
-  assert.equal(children.length, module.comparison.datasets.length + module.experiments.length + 1);
-  assert(children.slice(1, 1 + module.experiments.length).every(child => child.id.startsWith(`${module.id}-exp-`)));
-  assert(children.slice(1 + module.experiments.length).every(child => child.id.startsWith(`${module.id}-matrix-data-`)));
+  assert.equal(children.length, module.comparison.datasets.length + module.experiments.length + 2);
+  const visible = children.filter(child => !child.hiddenToc);
+  assert.deepEqual(visible.map(child => child.short), ["多实验分析结论", "单实验分析结论", ...module.comparison.datasets.map(dataset => dataset.title)]);
+  assert(children.slice(2, 2 + module.experiments.length).every(child => child.hiddenToc && child.id.startsWith(`${module.id}-exp-`)));
+  assert(children.slice(2 + module.experiments.length).every(child => child.id.startsWith(`${module.id}-matrix-data-`)));
   assert(!children.some(child => child.title.includes("券批次")));
   state.matrix.view = "detail"; // Stale state from the previous demo cannot restore a second style.
   assert.equal(prepareModuleCitation(report, module.id, view).scope, module.id);
+  const selectionBefore = state.experimentId;
+  const singleEntry = visible[1];
+  assert.equal(prepareModuleCitation(report, singleEntry.id, view).scope, singleEntry.id);
+  assert.equal(state.experimentId, selectionBefore);
+  assert(renderMultiReport(report, view).includes(`id="sec-${singleEntry.id}"`));
   assert.equal(prepareModuleCitation(report, singleScope(1, "DEMO-003"), view).scope, singleScope(1, "DEMO-003"));
+  assert.equal(state.experimentId, "DEMO-003");
+  assert.equal(prepareModuleCitation(report, singleEntry.id, view).scope, singleEntry.id);
   assert.equal(state.experimentId, "DEMO-003");
   const answer = multiAnswer(report, "核对计算", singleScope(1, "DEMO-003"), view).md;
   assert(answer.includes("DEMO-003") && !answer.includes("DEMO-001"));

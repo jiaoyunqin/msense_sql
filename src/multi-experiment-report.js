@@ -11,6 +11,7 @@ const icon = name => ({ chart: '<path d="M3 3v16h18M7 13l4-5 4 2 5-7"/>', data: 
 const svg = name => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">${icon(name)}</svg>`;
 const ai = scope => `<button type="button" class="ask-btn mm-ai" data-ask="${scope}">${svg("chart")} AI</button>`;
 const singleExperimentModule = (report, module) => report.snapshot.analysisType === "multi" && module.analysisType === "single";
+const singleConclusionScope = module => `${module.id}-single-conclusion`;
 function moduleNavigation(report, module) {
   const root = { id: module.id, no: "", title: module.title,
     short: module.analysisType === "multi" ? "多实验分析结论" : "单实验分析结论" };
@@ -46,9 +47,10 @@ export function reportDescriptor(saved) {
         : `v${saved.snapshot.templateVersion}`]],
     sections: modules.map(module => ({ group: true, no: String(module.index + 1).padStart(2, "0"), title: module.title,
       children: module.comparison ? [moduleNavigation(saved, module)[0],
+        { id: singleConclusionScope(module), no: "", title: "单实验分析结论", short: "单实验分析结论" },
         ...module.experiments.map(experiment => ({
           id: singleScope(module.index, experiment.id), no: "", title: `${experiment.name} · ${experimentLabel(experiment)}`,
-          short: `${experiment.name} · ${experimentLabel(experiment)}`
+          short: `${experiment.name} · ${experimentLabel(experiment)}`, hiddenToc: true
         })),
         ...module.comparison.datasets.map((dataset, index) => ({
           id: `${module.id}-matrix-data-${index}`, no: `${module.index + 1}.${index + 1}`,
@@ -72,7 +74,7 @@ function matrixSingleConclusionHTML(module, experiment) {
   const scope = singleScope(module.index, experiment.id);
   const messages = experiment.status === "success" ? experiment.conclusions
     : [{ text: `该实验暂未生成分析结论：${experiment.error || "数据不可用"}。` }];
-  return `<section class="sec mx-single-conclusion" id="sec-${scope}" data-sec="${scope}" data-conclusion-experiment="${esc(experiment.id)}">
+  return `<section class="mx-single-conclusion" id="sec-${scope}" data-sec="${scope}" data-conclusion-experiment="${esc(experiment.id)}">
     <div class="mx-single-label"><strong>${esc(experiment.name)}</strong><span>${esc(experimentLabel(experiment))}</span></div>
     ${conclusionHTML("单实验分析结论", messages, scope)}</section>`;
 }
@@ -152,8 +154,9 @@ export function renderMultiReport(report, view) {
       return `<section class="sec mm-module" id="sec-${module.id}" data-sec="${module.id}" data-mm-section="${module.id}" data-module-analysis-type="${module.analysisType}">
         <header class="mm-module-heading"><h2>${esc(module.title)}</h2><p>${esc(module.description)}</p></header>
         ${cross ? conclusionHTML("多实验分析结论", module.conclusions, module.id) : ""}
-        ${matrix ? `${experimentSelectorHTML(module, experiment)}
-          ${matrixSingleConclusionHTML(module, experiment)}
+        ${matrix ? `<div class="sec" id="sec-${singleConclusionScope(module)}" data-sec="${singleConclusionScope(module)}">
+          ${experimentSelectorHTML(module, experiment)}
+          ${matrixSingleConclusionHTML(module, experiment)}</div>
           <div class="mm-data-heading">${svg("data")}<strong>数据明细</strong></div>
           ${matrixHTML(module, state)}` : detail()}</section>`;
     }).join("")}`;
@@ -253,7 +256,7 @@ export function prepareModuleCitation(report, scope, view) {
     const { matrix } = matrixView(state, module.comparison);
     const prefix = `${module.id}-matrix-cell-`;
     if (resolved.startsWith(prefix)) return focusMatrixEvidence(module, state, resolved.slice(prefix.length));
-    if (resolved === module.id) return { scope: resolved, moduleId: module.id };
+    if (resolved === module.id || resolved === singleConclusionScope(module)) return { scope: resolved, moduleId: module.id };
     const experiment = module.experiments.find(experiment => resolved === singleScope(module.index, experiment.id)
       || resolved.startsWith(`${singleScope(module.index, experiment.id)}-data-`));
     if (experiment && resolved === singleScope(module.index, experiment.id)) {
