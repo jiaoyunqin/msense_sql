@@ -22,8 +22,8 @@ const draft = {
 };
 let checks = 0;
 const check = (label, fn) => { fn(); checks++; console.log(`✓ ${label}`); };
-check("独立实验 ID 去重，支持中英文分隔符", () => {
-  assert.deepEqual(parseExperimentIds("demo-001，DEMO-002\nDEMO-001 DEMO-003"), { ids: ["DEMO-001", "DEMO-002", "DEMO-003"], duplicates: 1 });
+check("支持中英文分隔符，保留同 ID 输入供选择不同钱效候选项", () => {
+  assert.deepEqual(parseExperimentIds("demo-001，DEMO-002\nDEMO-001 DEMO-003"), { ids: ["DEMO-001", "DEMO-002", "DEMO-001", "DEMO-003"] });
 });
 check("未知身份、非法日期、反向窗口和无策略组被拦截", () => {
   assert(experimentIssues(experimentInput("UNKNOWN")).length);
@@ -67,7 +67,7 @@ check("所选钱效实验与逐实验日期进入快照，切换候选不污染�
   assert.equal(task.snapshot.experiments[0].definition.qxExperimentId, candidate.qxExperimentId);
   assert.equal(task.snapshot.experiments[0].input.end, "2026-10-20");
 });
-check("多实验要求不同实验；单实验不能替代多实验", () => {
+check("多实验要求不同 ID 与候选项组合；单实验不能替代多实验", () => {
   assert(workbenchIssues(store, { ...draft, experiments: [draft.experiments[0]] }).length);
   assert(workbenchIssues(store, { ...draft, experiments: [draft.experiments[0], draft.experiments[0]] }).length);
   assert(workbenchIssues(store, { ...draft, analysisType: "single", templateId: "demo-template-single" }).length);

@@ -26,7 +26,9 @@ export function formatCalculatedValue(value, field) {
 }
 export function localCalculationContext(source, modeId, context, dimensions = [], grain = null) {
   return { schemaVersion: 1, capabilityId: source.capabilityId, version: source.version, modeId,
-    experimentId: context.libra_id, window: { start: context.start_date, end: context.end_date },
+    experimentId: context.libra_id,
+    ...(context.qx_experiment_id !== undefined ? { qxExperimentId: context.qx_experiment_id } : {}),
+    window: { start: context.start_date, end: context.end_date },
     groupKey: "group_id", dimensionKeys: Object.fromEntries(dimensions.map(field => [field.key, field.alias])),
     grain: grain || { schemaVersion: 1, population: `local:${source.capabilityId}:v${source.version}`,
       entity: "experiment-group", experimentNamespace: "local-libra", groupNamespace: "local-libra-group",
@@ -85,7 +87,8 @@ export function computeModuleCalculations(module, inputRecords, definitionFor = 
       for (const key of new Set([...a.rows.keys(), ...(b?.rows.keys() || [])])) {
         const inputA = a.rows.get(key), inputB = b?.rows.get(key);
         const anchor = inputA || inputB, raw = anchor.row, context = anchor.record.calculationContext;
-        const identity = JSON.stringify([grainIdentity, context.experimentId, context.window]);
+        const identity = JSON.stringify([grainIdentity,
+          context.qxExperimentId ? [context.experimentId, context.qxExperimentId] : context.experimentId, context.window]);
         let dataset = datasets.get(identity);
         if (!dataset) {
           const dimensions = anchor.record.fields.filter(field => field.role === "dimension");
@@ -175,7 +178,9 @@ export function comparisonCalculationRecords(module, result, entry) {
         return { group_id: row.groupId, group_name: row.groupName, is_control: 0,
           ...(dimensioned ? { dimension_value: dimensionValue } : {}), ...values, calculationReasons: missing };
       }).filter(Boolean);
-      const context = { libra_id: entry.input.id, start_date: entry.input.start, end_date: entry.input.end };
+      const context = { libra_id: entry.input.id,
+        ...(entry.definition.qxExperimentId ? { qx_experiment_id: entry.definition.qxExperimentId } : {}),
+        start_date: entry.input.start, end_date: entry.input.end };
       records.push({ id: uid("demodata"), sourceId: source.id, modeId, modeName: `${definition.name} · ${dimensioned ? "消费力分层" : "整体"}`,
         status: "success", context, fields: [{ key: "group_name", alias: "group_name", name: "分组", role: "identity", type: "string" },
           ...dimensions, ...metrics.map(field => ({ ...field, alias: field.key }))],

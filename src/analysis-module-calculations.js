@@ -175,7 +175,8 @@ export function indexCalculationRecord(record, expected) {
     || (typeof value === "number" && Number.isFinite(value));
   const date = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)
     && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0, 10) === value;
-  if (!scalar(context.experimentId) || !date(context.window?.start) || !date(context.window?.end)
+  if (!scalar(context.experimentId) || (context.qxExperimentId !== undefined && !scalar(context.qxExperimentId))
+    || !date(context.window?.start) || !date(context.window?.end)
     || context.window.start > context.window.end || !text(context.groupKey)
     || ["group_name", "groupName", "is_control"].includes(context.groupKey)
     || dimensions.some(dimension => !text(context.dimensionKeys?.[dimension.id]))
@@ -188,7 +189,9 @@ export function indexCalculationRecord(record, expected) {
       && (typeof value !== dimensions[index].type || (typeof value === "number" && !Number.isFinite(value))))) {
       issues.push({ code: "row-identity", message: "结果行缺少有效分组 ID 或维度原始值。" }); continue;
     }
-    const key = JSON.stringify([grainKey, context.experimentId, groupId, context.window.start, context.window.end, values]);
+    const key = JSON.stringify([grainKey,
+      context.qxExperimentId ? [context.experimentId, context.qxExperimentId] : context.experimentId,
+      groupId, context.window.start, context.window.end, values]);
     if (rows.has(key) || duplicates.has(key)) {
       rows.delete(key); duplicates.add(key);
       issues.push({ code: "duplicate-key", key, message: "同实验、分组、窗口和粒度存在重复组合键。" });

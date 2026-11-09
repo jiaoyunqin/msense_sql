@@ -63,9 +63,11 @@ export function couponIntervalDataset(source, result, entry, mode) {
   const evidence = result.couponIntervals;
   if (!metrics.length || !evidence || !couponIntervalModes.includes(mode)) return null;
   const overall = mode === "interval-overall";
+  const rows = overall ? evidence.overall : evidence.batches;
+  if (!Array.isArray(rows)) return null;
   const fields = [...(overall ? [{ key: "overall", name: "整体", unit: "" }] : batchFields), ...metrics];
   const groups = new Map(entry.definition.groups.map(group => [group.id, group.name]));
-  const records = (overall ? evidence.overall : evidence.batches)
+  const records = rows
     .filter(row => entry.input.groupIds.includes(row.groupId) && groups.has(row.groupId))
     .map(row => ({
       id: overall ? row.groupId : row.batchId, groupId: row.groupId, groupName: groups.get(row.groupId),
@@ -131,19 +133,19 @@ export function couponIntervalAcrossSummary(experiments) {
   if (evidence.length < 2) return ["本模块可用的核销间隔数据不足两个实验，暂不形成跨实验比较。"];
   const messages = [];
   const summaries = evidence.filter(item => item.overall).map(({ experiment, overall }) =>
-    `${experiment.id}（${experiment.name}）：${overall.records.map(row => `${row.groupName} ${overallSummary(overall, row)}`).join("；")}`);
+    `${experiment.label || experiment.id}（${experiment.name}）：${overall.records.map(row => `${row.groupName} ${overallSummary(overall, row)}`).join("；")}`);
   if (summaries.length) messages.push(`整体核销时效：${summaries.join("。")}。`);
   const means = evidence.flatMap(({ experiment, overall }) => (overall?.records || []).map(row =>
     ({ experiment, row, mean: rawValue(overall, row, "interval_mean") }))).filter(item => item.mean != null)
     .sort((a, b) => a.mean - b.mean);
   if (new Set(means.map(item => item.experiment.id)).size > 1) {
     const fastest = means[0], slowest = means.at(-1);
-    messages.push(`当前样本中，${fastest.experiment.id} 的${fastest.row.groupName}平均核销间隔最短（${hours(fastest.mean)}），`
-      + `${slowest.experiment.id} 的${slowest.row.groupName}最长（${hours(slowest.mean)}）。各实验的券时效、人群和观察窗口不同，该排序仅描述已核销样本的时效。`);
+    messages.push(`当前样本中，${fastest.experiment.label || fastest.experiment.id} 的${fastest.row.groupName}平均核销间隔最短（${hours(fastest.mean)}），`
+      + `${slowest.experiment.label || slowest.experiment.id} 的${slowest.row.groupName}最长（${hours(slowest.mean)}）。各实验的券时效、人群和观察窗口不同，该排序仅描述已核销样本的时效。`);
   }
   const ranges = evidence.filter(item => item.batches).flatMap(({ experiment, batches }) => {
     const range = batchRange(batches);
-    return range ? [`${experiment.id} 各批次 P50 为 ${hours(range.min)} 至 ${hours(range.max)}`] : [];
+    return range ? [`${experiment.label || experiment.id} 各批次 P50 为 ${hours(range.min)} 至 ${hours(range.max)}`] : [];
   });
   if (ranges.length) messages.push(`券批次差异：${ranges.join("；")}。建议切换实验查看具体批次，避免用整体均值替代批次判断。`);
   messages.push("未发券对照组不参与领券核销间隔统计。间隔更短表示已核销优惠券更快完成使用，不能直接推断转化增量或钱效更高；本模块未提供显著性检验。");

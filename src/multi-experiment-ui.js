@@ -1,14 +1,15 @@
 import { createIcons, icons } from "lucide";
 import {
-  copy, multiId, analysisTypes, demoGoal, demoExperiments, parseExperimentIds, experimentInput, findExperiment, experimentCandidates, resolveExperiment,
+  copy, multiId, analysisTypes, demoGoal, demoExperiments, parseExperimentIds, experimentInput, addExperimentInputs, selectExperimentCandidate, findExperiment, experimentCandidates, resolveExperiment,
   experimentIssues, newTemplate, templateChanged, templateIssues, templateStatus, setTemplateEnabled, publishTemplate, publishedTemplates,
   initializeMultiAnalysis, workbenchModuleOptions, workbenchIssues, createAnalysisTask, executeAnalysisTask, createTaskReport
 } from "./multi-experiment-data.js";
 import { reportDescriptor, reportListRow, renderMultiReport, multiSuggestions, multiAnswer, applyModuleReportEvent, prepareModuleCitation } from "./multi-experiment-report.js";
-import { demoModuleReport, demoMixedModuleReport, moduleView, singleScope } from "./multi-report-content.js";
+import { demoModuleReport, demoMixedModuleReport, demoMatrixModuleReport, moduleView, singleScope } from "./multi-report-content.js";
 import { referenceDescriptor, referenceListRow, renderReferenceReport, referenceEvent, referenceAnswer } from "./report-reference.js";
 import { moduleConfiguration, moduleIssues } from "./analysis-module-data.js";
 import { renderTemplateEditor, renderTemplatePicker, renderTemplatePickerRows, templateModuleOptions, templateEditorStatus } from "./report-template-editor.js";
+import { selectedCandidateId, findExperimentResult, reportExperimentLabel } from "./experiment-identity.js";
 import "./multi-experiment.css";
 import "./report-template-catalog.css";
 import "./experiment-workbench.css";
@@ -44,12 +45,14 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
   const reportViews = new Map();
   const bundledReport = demoModuleReport();
   const mixedReport = demoMixedModuleReport();
+  const matrixReport = demoMatrixModuleReport();
   const defaultDraft = type => ({ analysisType: type, goal: demoGoal, templateId: publishedTemplates(store, type)[0]?.id || "",
     catalogType: "all", moduleIds: [], experiments: [], bulk: "", supplement: "", unifiedStart: "", unifiedEnd: "", scenario: "normal" });
   const draft = () => {
     const state = store.multiAnalysis.draft ||= defaultDraft("single");
     state.moduleIds ||= [];
     state.catalogType ||= "all";
+    state.experiments.forEach(input => { input.rowId ||= multiId("experiment-row"); });
     return state;
   };
   const save = () => { persist(); };
@@ -132,18 +135,24 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
       const pending = candidates.length > 1 && input.qxExperimentId === "";
       const limits = experiment ? `min="${experiment.available[0]}" max="${experiment.available[1]}"` : "";
       const rowErrors = pending ? [] : experimentIssues(input, state.goal);
-      return `<article class="ma-experiment-row" data-experiment-id="${esc(input.id)}">
+      const selectedElsewhere = new Set(state.experiments.filter(other => other !== input && other.id === input.id)
+        .map(other => selectedCandidateId(other, resolveExperiment(other))));
+      const canAdd = state.experiments.filter(other => other.id === input.id).length < candidates.length;
+      return `<article class="ma-experiment-row" data-experiment-id="${esc(input.id)}" data-experiment-row="${esc(input.rowId)}">
         <div class="ma-observation-grid"><div class="ma-observation-field"><span>实验 ID</span>
           <div class="ma-parsed-id"><input value="${esc(input.id)}" readonly aria-label="实验 ID ${esc(input.id)}">
-            ${button("remove-experiment", icon("x"), `data-id="${esc(input.id)}" aria-label="移除实验 ${esc(input.id)}" title="移除实验"`, "ma-remove-experiment")}</div></div>
+            ${button("remove-experiment", icon("x"), `data-id="${esc(input.rowId)}" aria-label="移除实验 ${esc(input.id)} ${esc(input.qxExperimentId)}" title="移除实验"`, "ma-remove-experiment")}</div></div>
           <div class="ma-observation-field"><span>观测时间</span><div class="ma-observation-dates">
-            ${observationDate("开始", `date-start.${input.id}`, input.start, `aria-label="${esc(input.id)} 观测开始日期" ${limits} ${pending || !candidates.length ? "disabled" : ""}`)}
+            ${observationDate("开始", `date-start.${input.rowId}`, input.start, `aria-label="${esc(input.id)} ${esc(input.qxExperimentId)} 观测开始日期" ${limits} ${pending || !candidates.length ? "disabled" : ""}`)}
             <span class="ma-observation-arrow" aria-hidden="true">${icon("arrow-right")}</span>
-            ${observationDate("结束", `date-end.${input.id}`, input.end, `aria-label="${esc(input.id)} 观测结束日期" ${limits} ${pending || !candidates.length ? "disabled" : ""}`)}</div></div></div>
+            ${observationDate("结束", `date-end.${input.rowId}`, input.end, `aria-label="${esc(input.id)} ${esc(input.qxExperimentId)} 观测结束日期" ${limits} ${pending || !candidates.length ? "disabled" : ""}`)}</div></div></div>
         ${candidates.length > 1 ? `<label class="ma-candidate-field"><span>钱效实验候选项</span><span class="ma-candidate-select">
-          <select data-model="ma-qx-experiment" data-id="${esc(input.id)}" aria-label="${esc(input.id)} 钱效实验候选项" class="${pending ? "placeholder" : ""}">
-            ${options([["", "该 ID 匹配多个实验，请选择"], ...candidates.map(candidate => [candidate.qxExperimentId,
-              `${candidate.name} · ${candidate.period.join(" 至 ")} · 钱效实验 ID ${candidate.qxExperimentId}`])], input.qxExperimentId ?? candidates[0].qxExperimentId)}</select>${icon("chevron-down")}</span></label>` : ""}
+          <select data-model="ma-qx-experiment" data-id="${esc(input.rowId)}" aria-label="${esc(input.id)} 钱效实验候选项" class="${pending ? "placeholder" : ""}">
+            ${options([["", "该 ID 匹配多个实验，请选择"]], input.qxExperimentId)}
+            ${candidates.map(candidate => `<option value="${esc(candidate.qxExperimentId)}"
+              ${candidate.qxExperimentId === selectedCandidateId(input, experiment) ? "selected" : ""}
+              ${selectedElsewhere.has(candidate.qxExperimentId) ? "disabled" : ""}>${esc(`${candidate.name} · ${candidate.period.join(" 至 ")} · 钱效实验 ID ${candidate.qxExperimentId}${selectedElsewhere.has(candidate.qxExperimentId) ? "（已添加）" : ""}`)}</option>`).join("")}</select>${icon("chevron-down")}</span></label>
+          ${button("add-candidate", `${icon("plus")}添加其他候选项`, `data-id="${esc(input.id)}" ${canAdd ? "" : "disabled"} title="${canAdd ? "为同一实验 ID 新增候选项选择" : "该 ID 的候选项已全部在列表中"}"`, "text")}` : ""}
         ${experiment ? `<div class="ma-observation-summary ready"><div><strong>${esc(experiment.name)}</strong><span>实验周期：${experiment.period.join(" 至 ")}</span></div>
           <span>观测结束日最晚为 ${experiment.available[1]}（示例数据范围）</span></div>`
           : pending ? '<div class="ma-observation-summary">该实验 ID 匹配到多个与当前分析配置业务目标一致的钱效实验，请先选择。</div>' : ""}
@@ -170,7 +179,7 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
       const input = workbenchInput();
       footer.querySelector('[data-action="ma-generate"]').disabled = workbenchIssues(store, input).length > 0
         || store.multiAnalysis.tasks.some(task => task.status === "running");
-      if (state.analysisType === "multi") outlet.querySelector(".ma-home-input-count").textContent = `已添加 ${input.experiments.length} 个独立实验`;
+      if (state.analysisType === "multi") outlet.querySelector(".ma-home-input-count").textContent = `已添加 ${input.experiments.length} 个实验分析项`;
       else {
         const issue = outlet.querySelector(".ma-home-single-issue");
         issue.textContent = input.experiments.length > 1 ? "多个实验请选择多实验分析模板或模块。"
@@ -180,7 +189,7 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
     }
     const summary = outlet.querySelector(".ma-workbench-summary");
     if (!summary) return;
-    summary.innerHTML = `<span class="ma-overline">本次分析</span><h2>${analysisTypes[state.analysisType]}</h2><div class="ma-count"><strong>${state.experiments.length}</strong><span>个独立实验</span></div>
+    summary.innerHTML = `<span class="ma-overline">本次分析</span><h2>${analysisTypes[state.analysisType]}</h2><div class="ma-count"><strong>${state.experiments.length}</strong><span>个实验分析项</span></div>
       <dl><dt>业务目标</dt><dd>${state.goal}</dd><dt>报告模板</dt><dd>${esc(template?.selectedVersion.configuration.name || "尚未选择")}</dd><dt>固定版本</dt><dd>${template ? `v${template.selectedVersion.number}` : "—"}</dd></dl>
       ${trialModule ? '<p class="ma-notice">本次为模块私有试跑，结果保留在模块上下文。</p>' : ""}
       ${button("generate", trialModule ? "开始模块试跑" : "生成报告", "", "primary ma-full")}
@@ -265,11 +274,14 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
       <section class="ma-panel"><header><div><h2>${task.status === "running" ? "正在逐实验分析" : failures ? "分析部分完成" : "分析已完成"}</h2><p>${successes}/${task.results.length} 个实验成功${failures ? ` · ${failures} 个失败` : ""}</p></div>
         ${task.status !== "running" && failures ? button("retry", "重试失败项", `data-id="${task.id}"`, "primary") : ""}</header>
       <div class="ma-task-progress"><span style="width:${(successes + failures) / task.results.length * 100}%"></span></div>
-      <div class="ma-task-list">${task.results.map(result => `<article><span class="ma-task-dot ${result.status}"></span><div><strong>${result.id} · ${esc(task.snapshot.experiments.find(entry => entry.input.id === result.id).definition.name)}</strong>
-        <p>${statuses[result.status]}${result.error ? ` · ${esc(result.error)}` : ""}</p></div><small>${result.attempts ? `第 ${result.attempts} 次` : ""}</small></article>`).join("")}</div>
+      <div class="ma-task-list">${task.results.map(result => {
+        const entry = task.snapshot.experiments.find(entry => findExperimentResult(task.results, entry, task.snapshot) === result);
+        return `<article><span class="ma-task-dot ${result.status}"></span><div><strong>${esc(entry ? reportExperimentLabel(task.snapshot, entry) : result.id)} · ${esc(entry?.definition.name || "实验快照不可用")}</strong>
+        <p>${statuses[result.status]}${result.error ? ` · ${esc(result.error)}` : ""}</p></div><small>${result.attempts ? `第 ${result.attempts} 次` : ""}</small></article>`;
+      }).join("")}</div>
       ${task.reportId && task.status !== "running" ? `<div class="ma-task-result"><p>${failures ? "报告包含成功实验，失败项已明确标记。" : "报告已生成，配置与数据已固定保存。"}</p><a class="ma-button primary" href="#/report/${task.reportId}">查看${task.private ? "模块试跑" : "分析"}报告 →</a></div>`
         : task.status !== "running" ? `<div class="ma-warning">${task.snapshot.analysisType === "multi" && successes < 2 ? "成功实验不足 2 个，暂不生成横向比较。请重试失败项。" : "尚未生成报告。"}</div>` : ""}
-      <details class="ma-method"><summary>本次输入快照</summary><p>${analysisTypes[task.snapshot.analysisType]} · ${task.private ? "模块草稿快照" : task.snapshot.origin === "modules" ? "已发布模块快照" : `模板 v${task.snapshot.templateVersion}`}</p>${task.snapshot.experiments.map(({ input }) => `<p>${input.id} · ${input.start} 至 ${input.end} · ${input.groupIds.join("、")}</p>`).join("")}</details></section>
+      <details class="ma-method"><summary>本次输入快照</summary><p>${analysisTypes[task.snapshot.analysisType]} · ${task.private ? "模块草稿快照" : task.snapshot.origin === "modules" ? "已发布模块快照" : `模板 v${task.snapshot.templateVersion}`}</p>${task.snapshot.experiments.map(entry => `<p>${esc(reportExperimentLabel(task.snapshot, entry))} · ${entry.input.start} 至 ${entry.input.end} · ${entry.input.groupIds.join("、")}</p>`).join("")}</details></section>
       ${task.private ? `<a href="#/modules/${task.moduleId}">返回模块配置</a>` : ""}</div>`;
     createIcons({ icons });
   }
@@ -417,16 +429,16 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
       save(); updateWorkbenchSummary();
     }
     if (action === "parse") {
-      const parsed = parseExperimentIds(state.bulk), existing = new Set(state.experiments.map(input => input.id));
-      let duplicates = parsed.duplicates, added = 0;
-      for (const id of parsed.ids) {
-        if (existing.has(id)) duplicates++;
-        else { state.experiments.push(experimentInput(id, { requireSelection: true })); existing.add(id); added++; }
-      }
-      note = parsed.ids.length ? `已添加 ${added} 个实验${duplicates ? `，已去重 ${duplicates} 个重复 ID` : ""}。` : "请先填写实验 ID。";
+      const parsed = parseExperimentIds(state.bulk), { added, duplicates } = addExperimentInputs(state.experiments, parsed.ids);
+      note = parsed.ids.length ? `已添加 ${added} 个分析项${duplicates ? `，${duplicates} 项已存在或没有可新增的候选项` : ""}。` : "请先填写实验 ID。";
       outlet.querySelector(".ma-parse-note").textContent = note; errors = []; save(); renderExperimentRows();
     }
-    if (action === "remove-experiment") { state.experiments = state.experiments.filter(input => input.id !== id); save(); renderExperimentRows(); }
+    if (action === "add-candidate") {
+      const { added } = addExperimentInputs(state.experiments, [id]);
+      if (!added) showToast("该 ID 的候选项已全部在列表中");
+      errors = []; save(); renderExperimentRows();
+    }
+    if (action === "remove-experiment") { state.experiments = state.experiments.filter(input => input.rowId !== id); save(); renderExperimentRows(); }
     if (action === "generate") {
       if (store.multiAnalysis.tasks.some(task => task.status === "running")) { showToast("已有分析正在运行，请等待当前任务完成"); return; }
       if (!trialModule && state.analysisType === "single") state.experiments = workbenchInput().experiments;
@@ -508,19 +520,21 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
     }
     if (key === "template-choice") state.templateId = el.value;
     else if (key === "qx-experiment") {
-      const input = state.experiments.find(input => input.id === el.dataset.id);
+      const input = state.experiments.find(input => input.rowId === el.dataset.id);
       if (!input) return true;
-      Object.assign(input, experimentInput(input.id, { qxExperimentId: el.value }));
+      try { selectExperimentCandidate(state.experiments, input.rowId, el.value); }
+      catch (error) { showToast(error.message); }
       save(); renderExperimentRows();
-      [...outlet.querySelectorAll('[data-model="ma-qx-experiment"]')].find(select => select.dataset.id === input.id)?.focus();
+      [...outlet.querySelectorAll('[data-model="ma-qx-experiment"]')].find(select => select.dataset.id === input.rowId)?.focus();
       return true;
     } else if (key.startsWith("date-")) {
-      const [part, id] = key.split("."), input = state.experiments.find(input => input.id === id);
+      const [part, id] = key.split("."), input = state.experiments.find(input => input.rowId === id);
+      if (!input) return true;
       input[part === "date-start" ? "start" : "end"] = el.value;
     } else state[key] = el.value;
     save(); refreshObservationDates(); updateWorkbenchSummary();
     if (key.startsWith("date-")) {
-      const row = el.closest(".ma-experiment-row"), input = state.experiments.find(input => input.id === row.dataset.experimentId);
+      const row = el.closest(".ma-experiment-row"), input = state.experiments.find(input => input.rowId === row.dataset.experimentRow);
       row.querySelector(".ma-row-errors").innerHTML = experimentIssues(input, state.goal).map(error => `<p>${esc(error)}</p>`).join("");
     }
     return true;
@@ -558,12 +572,13 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
     reports: {
       getReport: id => {
         if (id === "r-single-reference") return referenceDescriptor();
-        const saved = id === bundledReport.id ? bundledReport : id === mixedReport.id ? mixedReport
+        const saved = id === bundledReport.id ? bundledReport : id === mixedReport.id ? mixedReport : id === matrixReport.id ? matrixReport
           : store.multiAnalysis.reports.find(report => report.id === id);
         return saved && reportDescriptor(saved);
       },
       getList: () => [
         referenceListRow(),
+        reportListRow(matrixReport),
         reportListRow(bundledReport),
         reportListRow(mixedReport),
         ...store.multiAnalysis.reports.filter(report => !report.private).map(reportListRow),

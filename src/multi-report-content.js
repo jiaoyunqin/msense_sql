@@ -5,6 +5,8 @@ import { calculationMetricRef } from "./analysis-module-calculations.js";
 import { couponIntervalCapability, couponIntervalModes, couponIntervalMetrics, createCouponIntervalEvidence,
   couponIntervalDataset, couponIntervalSingleSummary, couponIntervalAcrossSummary } from "./coupon-interval-demo.js";
 import { preAAMetrics, createPreAAEvidence, preAADataset, preAASingleSummary } from "./pre-aa-demo.js";
+import { captureMatrixSnapshot, matrixPresentation } from "./matrix-report-data.js";
+import { findExperimentResult, reportExperimentKey, reportExperimentLabel, experimentLabel, selectedCandidateId } from "./experiment-identity.js";
 
 const metric = key => comparisonMetrics.find(field => field.key === key);
 const fmt = (value, key) => formatMetric(value, metric(key) || { digits: 2 });
@@ -44,7 +46,7 @@ function coreDataset(source, result, entry, mode) {
   }
   return { sourceId: source.id, sourceName: source.definition?.name || "独立实验核心指标（模拟）",
     sourceVersion: source.version, mode, title, firstColumn: overall ? "实验分组" : "消费力分层",
-    fields, records, experimentId: entry.input.id };
+    fields, records, experimentId: entry.reportKey || entry.input.id };
 }
 function backgroundDataset(source, result, entry) {
   const definition = source.definition;
@@ -63,7 +65,7 @@ function backgroundDataset(source, result, entry) {
   ...rows.map(row => ({ id: row.groupId, groupId: row.groupId, groupName: row.groupName, label: row.groupName,
     cells: fields.map(field => ({ text: field.strategyKey === "period" ? entry.definition.period.join(" 至 ") : row.strategy[field.strategyKey] || "未提供" })) }))];
   return { sourceId: source.id, sourceName: definition?.name || "实验背景与配置", sourceVersion: source.version,
-    mode: "strategy", title: "实验背景与配置", firstColumn: "实验分组", fields, records, experimentId: entry.input.id };
+    mode: "strategy", title: "实验背景与配置", firstColumn: "实验分组", fields, records, experimentId: entry.reportKey || entry.input.id };
 }
 function calculatedDataset(record, entry, version) {
   const fields = record.fields.filter(field => field.calculated && field.showInReport);
@@ -72,7 +74,7 @@ function calculatedDataset(record, entry, version) {
   return { calculated: true, sourceId: "module-calculations", sourceName: "当前分析模块计算结果",
     sourceVersion: version, mode: `calculated:${record.modeId}`, title: record.modeName,
     firstColumn: dimensions.length ? dimensions.map(field => field.name).join(" × ") : "实验分组",
-    dimensioned: dimensions.length > 0, fields, experimentId: entry.input.id,
+    dimensioned: dimensions.length > 0, fields, experimentId: entry.reportKey || entry.input.id,
     records: record.rawRows.map((row, index) => ({
       id: `calculated-${index}`, groupId: row.group_id, groupName: row.group_name, control: row.is_control === 1,
       label: dimensions.length ? dimensions.map(field => field.valueLabels?.[row[field.alias]] ?? row[field.alias] ?? "—").join(" × ") : row.group_name,
@@ -87,12 +89,13 @@ function moduleMetrics(module, mode = null) {
 }
 function summarizeSingle(module, entry, result, datasets, index) {
   const fields = moduleMetrics(module, "overall"), breakdownFields = moduleMetrics(module, "demo-spend"), rows = result.rows || [];
+  const scope = singleScope(index, entry.reportKey || entry.input.id);
   if (result.status !== "success") return [];
   const messages = [];
-  messages.push(...preAASingleSummary(datasets).map(text => ({ text, scope: singleScope(index, entry.input.id) })));
-  messages.push(...couponIntervalSingleSummary(datasets).map(text => ({ text, scope: singleScope(index, entry.input.id) })));
+  messages.push(...preAASingleSummary(datasets).map(text => ({ text, scope })));
+  messages.push(...couponIntervalSingleSummary(datasets).map(text => ({ text, scope })));
   if (breakdownFields.length && datasets.some(dataset => dataset.mode === "demo-spend")) {
-    messages.push({ text: `${entry.definition.name}包含${new Set((result.breakdowns || []).map(row => row.dimension)).size}档消费力分层；每档均对应本实验自身同一分层对照组，未提供分层显著性。`, scope: singleScope(index, entry.input.id) });
+    messages.push({ text: `${entry.definition.name}包含${new Set((result.breakdowns || []).map(row => row.dimension)).size}档消费力分层；每档均对应本实验自身同一分层对照组，未提供分层显著性。`, scope });
   }
   if (fields.length) {
     for (const row of rows) {
@@ -100,26 +103,26 @@ function summarizeSingle(module, entry, result, datasets, index) {
         const value = row.values[field.key];
         return `${field.name} ${fmt(value.value, field.key)}${field.unit ? ` ${field.unit}` : ""}${field.uplift ? `，增幅 ${lift(value.uplift)}（${value.sig}）` : ""}`;
       });
-      if (details.length) messages.push({ text: `${row.groupName}：${details.join("；")}。`, scope: singleScope(index, entry.input.id) });
+      if (details.length) messages.push({ text: `${row.groupName}：${details.join("；")}。`, scope });
     }
     if (rows.some(row => fields.some(field => row.values[field.key].value === null)))
-      messages.push({ text: "部分指标未提供原始数据或无法计算，数据表保留缺失原因。", scope: singleScope(index, entry.input.id) });
+      messages.push({ text: "部分指标未提供原始数据或无法计算，数据表保留缺失原因。", scope });
   }
   const background = datasets.find(dataset => dataset.mode === "strategy");
   if (background) {
     for (const row of background.records.filter(row => !row.control)) {
       messages.push({ text: `${row.label}：${background.fields.map((field, index) => `${field.name}为${row.cells[index].text}`).join("；")}。`,
-        scope: singleScope(index, entry.input.id) });
+        scope });
     }
   }
   for (const dataset of datasets.filter(dataset => dataset.calculated)) {
     for (const row of dataset.records.filter(row => !row.control)) messages.push({
       text: `${row.groupName}${dataset.dimensioned ? ` / ${row.label}` : ""}：${dataset.fields.map((field, i) =>
         `${field.name} ${row.cells[i].text}${row.cells[i].reason ? `（${row.cells[i].reason}）` : ""}`).join("；")}。计算结果未附加显著性。`,
-      scope: singleScope(index, entry.input.id)
+      scope
     });
   }
-  if (!messages.length && datasets.length) messages.push({ text: `已展示${datasets.length}个数据集，当前模块没有可生成结论的已配置模拟指标。`, scope: singleScope(index, entry.input.id) });
+  if (!messages.length && datasets.length) messages.push({ text: `已展示${datasets.length}个数据集，当前模块没有可生成结论的已配置模拟指标。`, scope });
   return messages;
 }
 function summarizeAcross(module, experiments, index) {
@@ -128,7 +131,7 @@ function summarizeAcross(module, experiments, index) {
   const messages = [];
   messages.push(...couponIntervalAcrossSummary(experiments).map(text => ({ text, scope: moduleScope(index) })));
   for (const field of fields.filter(field => ["dac", "roi", "cost"].includes(field.key))) {
-    messages.push({ text: successful.map(experiment => `${experiment.id}（${experiment.name}）：${experiment.rows.map(row => {
+    messages.push({ text: successful.map(experiment => `${experimentLabel(experiment)}（${experiment.name}）：${experiment.rows.map(row => {
       const value = row.values[field.key];
       return `${row.groupName} ${field.uplift ? `增幅 ${lift(value.uplift)}（${value.sig}）` : fmt(value.value, field.key) + (field.unit ? ` ${field.unit}` : "")}`;
     }).join("、")}`).join("；") + `。${field.uplift ? "增幅均相对各实验自身对照组。" : `以上为${field.name}的逐实验结果。`}`,
@@ -138,19 +141,19 @@ function summarizeAcross(module, experiments, index) {
     messages.push({ text: successful.map(experiment => {
       const datasets = experiment.datasets.filter(dataset => dataset.mode === "demo-spend");
       const dimensions = [...new Set(datasets.flatMap(dataset => dataset.records.map(row => row.label)))];
-      return `${experiment.id}（${experiment.name}）：${dimensions.join("、") || "未提供分层数据"}`;
+      return `${experimentLabel(experiment)}（${experiment.name}）：${dimensions.join("、") || "未提供分层数据"}`;
     }).join("；") + "。本模块只配置分层数据；请切换实验核对各分层原值与自身对照组增幅，未提供分层显著性。",
     scope: moduleScope(index) });
   }
   const hasBackground = successful.some(experiment => experiment.datasets.some(dataset => dataset.mode === "strategy"));
   if (hasBackground) messages.push({ text: successful.map(experiment => {
     const dataset = experiment.datasets.find(dataset => dataset.mode === "strategy");
-    return `${experiment.id}：${dataset?.records.filter(row => !row.control).map(row =>
+    return `${experimentLabel(experiment)}：${dataset?.records.filter(row => !row.control).map(row =>
       `${row.label}（${dataset.fields.map((field, i) => `${field.name}：${row.cells[i].text}`).join("；")}）`).join("；") || "未提供配置"}`;
   }).join("。") + "。配置不同仅描述策略差异，不能直接据此确定因果。", scope: moduleScope(index) });
   const calculated = successful.filter(experiment => experiment.datasets.some(dataset => dataset.calculated));
   if (calculated.length) messages.push({ text: calculated.map(experiment =>
-    `${experiment.id}：${experiment.datasets.filter(dataset => dataset.calculated && !dataset.dimensioned).flatMap(dataset =>
+    `${experimentLabel(experiment)}：${experiment.datasets.filter(dataset => dataset.calculated && !dataset.dimensioned).flatMap(dataset =>
       dataset.records.filter(row => !row.control).map(row => `${row.groupName}（${dataset.fields.map((field, i) =>
         `${field.name} ${row.cells[i].text}`).join("；")}）`)).join("；") || "计算结果见分层明细"}`
   ).join("。") + "。各实验分别计算，请切换实验核对；未跨实验混算或推断显著性。", scope: moduleScope(index) });
@@ -161,8 +164,10 @@ export function buildReportModules(report) {
   return report.snapshot.modules.map((module, index) => {
     const chapter = report.snapshot.template.sections[index];
     const sources = module.configuration.sources.filter(source => source.showInReport);
-    const experiments = report.snapshot.experiments.map(entry => {
-      const result = report.results.find(result => result.id === entry.input.id) || { status: "failed", error: "未保存该实验的数据" };
+    const experiments = report.snapshot.experiments.map(savedEntry => {
+      const id = reportExperimentKey(report.snapshot, savedEntry);
+      const entry = id === savedEntry.input.id ? savedEntry : { ...savedEntry, reportKey: id };
+      const result = findExperimentResult(report.results, entry, report.snapshot) || { status: "failed", error: "未保存该实验的数据" };
       const datasets = [], gaps = [];
       if (result.status === "success") for (const source of sources) {
         if (source.capabilityId === "demo-comparison") {
@@ -199,7 +204,11 @@ export function buildReportModules(report) {
       }
       const status = result.status === "success" && !datasets.length ? "unavailable" : result.status;
       const conclusions = summarizeSingle(module, entry, result, datasets, index);
-      return { id: entry.input.id, name: entry.definition.name, input: entry.input, definition: entry.definition,
+      if (entry.reportKey) datasets.forEach(dataset => { dataset.experimentId = id; });
+      return { id,
+        ...(entry.reportKey ? { libraId: entry.input.id, qxExperimentId: selectedCandidateId(entry.input, entry.definition),
+          label: reportExperimentLabel(report.snapshot, entry) } : {}),
+        name: entry.definition.name, input: entry.input, definition: entry.definition,
         status, error: result.error || (status === "unavailable" ? "本模块没有可展示的已配置数据集。" : ""),
         datasets, gaps, rows: result.status === "success" ? result.rows || [] : [], conclusions };
     });
@@ -283,5 +292,15 @@ export function demoMixedModuleReport() {
     entry.definition.preAA = createPreAAEvidence(entry.definition, entry.input);
     report.results.find(result => result.id === entry.input.id).preAA = copy(entry.definition.preAA);
   }
+  return report;
+}
+export function demoMatrixModuleReport() {
+  const report = demoModuleReport();
+  report.id = "r-multi-matrix";
+  report.presentation = matrixPresentation;
+  report.createdAt = "2026-11-09T09:00:00+08:00";
+  report.snapshot.templateId = "demo-matrix-report";
+  report.snapshot.template.name = "多实验分析 · 跨实验数据对比";
+  report.matrixSnapshot = captureMatrixSnapshot(report);
   return report;
 }

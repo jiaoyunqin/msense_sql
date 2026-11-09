@@ -1,6 +1,7 @@
 import { computeModuleCalculations, comparisonCalculationRecords } from "./analysis-module-calculation-runtime.js";
 import { validateCalculatedMetrics } from "./analysis-module-calculations.js";
 import { createPreAAEvidence } from "./pre-aa-demo.js";
+import { experimentPairKey, selectedCandidateId, findExperimentResult } from "./experiment-identity.js";
 // Local, fictional fixtures. All report surfaces derive from the same task snapshot.
 export const copy = value => structuredClone(value);
 export const multiId = prefix => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -70,8 +71,7 @@ export function resolveExperiment(input) {
 }
 export function parseExperimentIds(text) {
   const tokens = String(text).trim().split(/[\s,，;；]+/).filter(Boolean).map(id => id.toUpperCase());
-  const ids = [...new Set(tokens)];
-  return { ids, duplicates: tokens.length - ids.length };
+  return { ids: tokens };
 }
 export function experimentInput(id, { requireSelection = false, qxExperimentId } = {}) {
   const candidates = experimentCandidates(id);
@@ -79,6 +79,34 @@ export function experimentInput(id, { requireSelection = false, qxExperimentId }
   const experiment = candidates.find(candidate => candidate.qxExperimentId === selectedId);
   return { id, qxExperimentId: selectedId || "", start: experiment?.period[0] || "", end: experiment?.period[1] || "",
     groupIds: experiment?.groups.map(group => group.id) || [] };
+}
+export function addExperimentInputs(inputs, ids) {
+  let added = 0, duplicates = 0;
+  for (const id of ids) {
+    const candidates = experimentCandidates(id), sameId = inputs.filter(input => input.id === id);
+    if (candidates.length > 1) {
+      const selected = new Set(sameId.map(input => selectedCandidateId(input, resolveExperiment(input))).filter(Boolean));
+      const pending = sameId.filter(input => input.qxExperimentId === "").length;
+      // Repeated IDs request another choice; never select an unchosen candidate automatically.
+      if (selected.size + pending >= candidates.length) { duplicates++; continue; }
+    } else if (sameId.length) { duplicates++; continue; }
+    inputs.push({ ...experimentInput(id, { requireSelection: true }), rowId: multiId("experiment-row") });
+    added++;
+  }
+  return { added, duplicates };
+}
+export function selectExperimentCandidate(inputs, rowId, qxExperimentId) {
+  const input = inputs.find(input => input.rowId === rowId);
+  if (!input) return false;
+  const selected = experimentInput(input.id, { qxExperimentId });
+  if (qxExperimentId && !resolveExperiment(selected)) throw new Error("钱效实验候选项无效，请重新选择。");
+  const key = experimentPairKey(selected);
+  if (key && inputs.some(other => other !== input
+    && experimentPairKey(other, resolveExperiment(other)) === key))
+    throw new Error("该实验 ID 与钱效候选项已添加，请选择其他候选项。");
+  if (input.qxExperimentId === qxExperimentId) return false;
+  Object.assign(input, selected);
+  return true;
 }
 export function dateStamp(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) return null;
@@ -231,9 +259,10 @@ export function workbenchIssues(store, draft, { trialModule = null } = {}) {
   const errors = [], min = draft.analysisType === "multi" ? 2 : 1;
   if (!analysisTypes[draft.analysisType]) errors.push("请选择有效分析类型。");
   if (draft.goal !== demoGoal) errors.push("请选择业务目标。");
-  if (draft.experiments.length < min) errors.push(`请添加至少 ${min} 个不同的实验。`);
+  if (draft.experiments.length < min) errors.push(`请添加至少 ${min} 个不同的实验分析项。`);
   if (draft.analysisType === "single" && draft.experiments.length !== 1) errors.push("单实验分析只能选择 1 个独立实验。");
-  if (new Set(draft.experiments.map(input => input.id)).size !== draft.experiments.length) errors.push("实验 ID 不能重复。");
+  const pairs = draft.experiments.map(input => experimentPairKey(input, resolveExperiment(input))).filter(Boolean);
+  if (new Set(pairs).size !== pairs.length) errors.push("实验 ID 与钱效候选项的组合不能重复。");
   if (trialModule) {
     if ((trialModule.analysisType || "single") !== draft.analysisType) errors.push("模块试跑类型与实验输入不一致。");
   } else if (draft.moduleIds?.length) {
@@ -243,7 +272,8 @@ export function workbenchIssues(store, draft, { trialModule = null } = {}) {
     for (const id of draft.moduleIds) if (!available.has(id)) errors.push("所选分析模块未上线、类型不一致或业务目标不一致。");
   } else if (!publishedTemplates(store, draft.analysisType).some(template => template.id === draft.templateId))
     errors.push("请选择同类型且模块版本有效的已发布模板。");
-  for (const input of draft.experiments) experimentIssues(input, draft.goal).forEach(error => errors.push(`${input.id}：${error}`));
+  for (const input of draft.experiments) experimentIssues(input, draft.goal).forEach(error =>
+    errors.push(`${input.id}${input.qxExperimentId ? ` / ${input.qxExperimentId}` : ""}：${error}`));
   return [...new Set(errors)];
 }
 const finite = value => typeof value === "number" && Number.isFinite(value);
@@ -274,7 +304,9 @@ export function deriveGroup(experiment, input, group) {
   for (const value of Object.values(values)) if (!finite(value.value)) {
     value.value = null; value.reason ||= "未提供数据";
   }
-  return { experimentId: experiment.id, experimentName: experiment.name, groupId: group.id,
+  return { experimentId: experiment.id,
+    ...(experiment.qxExperimentId ? { qxExperimentId: experiment.qxExperimentId, analysisKey: experimentPairKey(input, experiment) } : {}),
+    experimentName: experiment.name, groupId: group.id,
     groupName: group.name, controlId: control.id, controlName: control.name, users: group.users,
     days, start: input.start, end: input.end, values,
     raw: { dac, controlDac, gmv, controlGmv, subsidy, redemption },
@@ -337,7 +369,10 @@ export function createAnalysisTask(store, draft, { trialModule = null } = {}) {
           definition.preAA = createPreAAEvidence(definition, input);
         return { input, definition };
       }) }),
-    results: draft.experiments.map(input => ({ id: input.id, status: "pending", attempts: 0, rows: [], error: "" })) };
+    results: draft.experiments.map(input => ({ id: input.id,
+      qxExperimentId: selectedCandidateId(input, resolveExperiment(input)),
+      analysisKey: experimentPairKey(input, resolveExperiment(input)),
+      status: "pending", attempts: 0, rows: [], error: "" })) };
   store.multiAnalysis.tasks.unshift(task);
   if (task.private) {
     const module = store.modules.find(module => module.id === task.moduleId);
@@ -353,11 +388,15 @@ export async function executeAnalysisTask(task, onUpdate = () => {}, delay = 240
   try {
     for (const result of task.results.filter(result => result.status !== "success")) {
       result.attempts++; result.error = ""; result.status = "fetching"; onUpdate(task); await pause(delay);
-      if (task.scenario === "fail-last" && result.id === task.results.at(-1).id && result.attempts === 1) {
+      if (task.scenario === "fail-last" && result === task.results.at(-1) && result.attempts === 1) {
         result.status = "failed"; result.error = "模拟取数超时。可使用「重试失败项」恢复。"; onUpdate(task); continue;
       }
       result.status = "analyzing"; onUpdate(task); await pause(delay);
-      const { input, definition } = task.snapshot.experiments.find(entry => entry.input.id === result.id);
+      const entry = task.snapshot.experiments.find(entry => findExperimentResult(task.results, entry, task.snapshot) === result);
+      if (!entry) {
+        result.status = "failed"; result.error = "未找到唯一的实验 ID 与钱效候选项快照。"; onUpdate(task); continue;
+      }
+      const { input, definition } = entry;
       result.rows = definition.groups.filter(group => input.groupIds.includes(group.id))
         .map(group => deriveGroup(definition, input, group));
       result.breakdowns = deriveBreakdowns(definition, input);
@@ -387,7 +426,7 @@ export function reportMetrics(snapshot) {
 }
 export function comparisonBoundaries(snapshot, results) {
   const successful = results.filter(result => result.status === "success");
-  const entries = snapshot.experiments.filter(entry => successful.some(result => result.id === entry.input.id));
+  const entries = snapshot.experiments.filter(entry => findExperimentResult(results, entry, snapshot)?.status === "success");
   const rows = successful.flatMap(result => result.rows), boundaries = [];
   if (new Set(rows.map(row => row.days)).size > 1) boundaries.push("观察天数不同，累计值受窗口长度影响；可同时查看日均指标。");
   if (new Set(entries.map(entry => entry.definition.period.join("/"))).size > 1) boundaries.push("实验期不同，季节、活动和外部环境可能影响结果。");

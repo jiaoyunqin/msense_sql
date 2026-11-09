@@ -1,6 +1,9 @@
 import { analysisTypes } from "./multi-experiment-data.js";
 import { buildReportModules, moduleView, moduleScope, singleScope, datasetScope } from "./multi-report-content.js";
 import { normalizeReportStatus } from "./report-filters.js";
+import { matrixPresentation, buildMatrixComparisons, matrixDatasetKey, matrixView, findMatrixCell, matrixEvidenceScope } from "./matrix-report-data.js";
+import { usesMatrix, matrixHTML, applyMatrixEvent, focusMatrixEvidence } from "./matrix-report-ui.js";
+import { experimentLabel, reportExperimentKey, reportExperimentLabel, repeatedLibraId, selectedCandidateId, findExperimentResult } from "./experiment-identity.js";
 
 const esc = value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const icon = name => ({ chart: '<path d="M3 3v16h18M7 13l4-5 4 2 5-7"/>', data: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/>',
@@ -13,7 +16,7 @@ function moduleNavigation(report, module) {
     short: module.analysisType === "multi" ? "多实验分析结论" : "单实验分析结论" };
   if (singleExperimentModule(report, module)) return [root, ...module.experiments.flatMap((experiment, index) => [
     { id: singleScope(module.index, experiment.id), no: `${module.index + 1}.${index + 1}`,
-      title: `${module.title} · ${experiment.name} · ${experiment.id}`, short: `${experiment.name} · ${experiment.id}` },
+      title: `${module.title} · ${experiment.name} · ${experimentLabel(experiment)}`, short: `${experiment.name} · ${experimentLabel(experiment)}` },
     ...experiment.datasets.map((dataset, datasetIndex) => ({
       id: datasetScope(module.index, datasetIndex, experiment.id), no: "", title: dataset.title, short: dataset.title, hiddenToc: true
     }))
@@ -25,34 +28,53 @@ function moduleNavigation(report, module) {
       short: module.experiments.find(experiment => experiment.datasets[datasetIndex])?.datasets[datasetIndex].title || "数据集"
     })),
     ...module.experiments.map(experiment => ({ id: singleScope(module.index, experiment.id), no: "", hiddenToc: true,
-      title: `${module.title} · ${experiment.name} · ${experiment.id}`, short: experiment.id }))
+      title: `${module.title} · ${experiment.name} · ${experimentLabel(experiment)}`, short: experimentLabel(experiment) }))
   ];
 }
 export function reportDescriptor(saved) {
   const modules = buildReportModules(saved), success = saved.results.filter(result => result.status === "success").length;
-  return { ...saved, custom: true, moduleReport: true, presentation: "modules", moduleContent: modules,
+  if (saved.presentation === matrixPresentation) for (const module of modules) {
+    if (usesMatrix(saved, module)) module.comparison = buildMatrixComparisons(saved, module);
+  }
+  return { ...saved, custom: true, moduleReport: true, presentation: saved.presentation === matrixPresentation ? matrixPresentation : "modules", moduleContent: modules,
     kind: saved.private ? "模块试跑" : saved.snapshot.analysisType === "multi" ? "多实验报告" : "实验报告",
     title: saved.snapshot.template.name,
     meta: [["业务目标", saved.snapshot.goal], ["分析类型", analysisTypes[saved.snapshot.analysisType]],
-      ["实验范围", `${success}/${saved.results.length} 个实验成功`],
+      ["实验范围", `${success}/${saved.results.length} 个${saved.snapshot.experiments.some(entry => repeatedLibraId(saved.snapshot, entry.input.id)) ? "实验分析项" : "实验"}成功`],
       [saved.snapshot.origin === "modules" ? "模块版本" : "模板版本", saved.private ? "模块草稿快照"
         : saved.snapshot.origin === "modules" ? saved.snapshot.modules.map(module => `${module.configuration.name} · v${module.version}`).join("、")
         : `v${saved.snapshot.templateVersion}`]],
     sections: modules.map(module => ({ group: true, no: String(module.index + 1).padStart(2, "0"), title: module.title,
-      children: moduleNavigation(saved, module) })) };
+      children: module.comparison ? [moduleNavigation(saved, module)[0],
+        ...module.experiments.map(experiment => ({
+          id: singleScope(module.index, experiment.id), no: "", title: `${experiment.name} · ${experimentLabel(experiment)}`,
+          short: `${experiment.name} · ${experimentLabel(experiment)}`
+        })),
+        ...module.comparison.datasets.map((dataset, index) => ({
+          id: `${module.id}-matrix-data-${index}`, no: `${module.index + 1}.${index + 1}`,
+          title: dataset.title, short: dataset.title
+        }))] : moduleNavigation(saved, module) })) };
 }
 export function reportListRow(report) {
   const createdAt = report.createdAt || report.startedAt;
   return { rid: report.id, title: report.snapshot.template.name,
     type: report.snapshot.analysisType === "multi" ? "多实验报告" : "实验报告",
-    exp: `${report.results.length} 个独立实验 · ${report.snapshot.experiments.map(entry => entry.definition.name).join("、")}`,
-    libra: report.snapshot.experiments.map(entry => entry.input.id).join(" / "), qx: "本地模拟", status: normalizeReportStatus(report),
+    exp: `${report.results.length} 个${report.snapshot.experiments.some(entry => repeatedLibraId(report.snapshot, entry.input.id)) ? "实验分析项" : "独立实验"} · ${report.snapshot.experiments.map(entry => entry.definition.name).join("、")}`,
+    libra: report.snapshot.experiments.map(entry => reportExperimentLabel(report.snapshot, entry)).join(" / "), qx: "本地模拟", status: normalizeReportStatus(report),
     owner: "秦娇芸", createdAt, created: new Date(createdAt).toLocaleString("sv-SE").slice(0, 16),
     generated: report.createdAt ? new Date(report.createdAt).toLocaleString("sv-SE").slice(0, 16) : "", multi: true };
 }
 function conclusionHTML(title, messages, scope) {
   return `<div class="ccard mm-conclusion" data-card="${scope}"><div class="ccard-h"><span class="t">${svg("chart")}${title}</span><span class="grow"></span>${ai(scope)}</div>
     ${messages.length ? `<ul>${messages.map(message => `<li>${esc(message.text)}</li>`).join("")}</ul>` : '<p class="mm-muted">当前没有可用分析结论。</p>'}</div>`;
+}
+function matrixSingleConclusionHTML(module, experiment) {
+  const scope = singleScope(module.index, experiment.id);
+  const messages = experiment.status === "success" ? experiment.conclusions
+    : [{ text: `该实验暂未生成分析结论：${experiment.error || "数据不可用"}。` }];
+  return `<section class="sec mx-single-conclusion" id="sec-${scope}" data-sec="${scope}" data-conclusion-experiment="${esc(experiment.id)}">
+    <div class="mx-single-label"><strong>${esc(experiment.name)}</strong><span>${esc(experimentLabel(experiment))}</span></div>
+    ${conclusionHTML("单实验分析结论", messages, scope)}</section>`;
 }
 function cellHTML(cell) {
   const title = cell.reason || (cell.raw != null ? `原值：${cell.raw}${cell.control != null ? `；自身对照组：${cell.control}` : ""}` : cell.text);
@@ -77,12 +99,12 @@ function datasetHTML(module, experiment, dataset, datasetIndex, view, scopedToEx
       <div class="tbl-wrap mm-table-scroll" tabindex="0" aria-label="${esc(dataset.title)}，可横向滚动">${table}</div>
       ${dataset.calculated ? `<details class="mm-notes"><summary>计算公式与输入来源</summary><ul>${dataset.fields.map(field =>
         `<li>${esc(field.name)}：${esc(field.formulaText)}；${field.sources.map(source => `${esc(source.sourceName)} v${source.ref.version}`).join("、")}</li>`).join("")}</ul></details>` : ""}
-      <p class="mm-source">${esc(dataset.sourceName)} · ${dataset.calculated && !dataset.sourceVersion ? "模块草稿快照" : `v${dataset.sourceVersion || 1}`} · ${experiment.id}${dataset.evidencePeriod ? ` · 实验前 ${dataset.evidencePeriod.join(" 至 ")}` : ""}</p></div></section>`;
+      <p class="mm-source">${esc(dataset.sourceName)} · ${dataset.calculated && !dataset.sourceVersion ? "模块草稿快照" : `v${dataset.sourceVersion || 1}`} · ${esc(experimentLabel(experiment))}${dataset.evidencePeriod ? ` · 实验前 ${dataset.evidencePeriod.join(" 至 ")}` : ""}</p></div></section>`;
 }
 function experimentHTML(report, module, experiment, state, scopedToExperiment = false) {
   const singleId = singleScope(module.index, experiment.id);
   return `<div class="mm-experiment-content" id="sec-${singleId}" data-sec="${singleId}" data-selected-experiment="${experiment.id}">
-    <div class="mm-experiment-meta"><span>${experiment.id}</span><span>观察窗口 ${experiment.input.start} 至 ${experiment.input.end}</span><span>对照组：${esc(experiment.definition.control.name)}</span></div>
+    <div class="mm-experiment-meta"><span>${esc(experimentLabel(experiment))}</span><span>观察窗口 ${experiment.input.start} 至 ${experiment.input.end}</span><span>对照组：${esc(experiment.definition.control.name)}</span></div>
     ${experiment.status === "success" ? `${conclusionHTML("单实验分析结论", experiment.conclusions, singleId)}
       <div class="mm-data-heading">${svg("data")}<strong>数据明细</strong><span>${experiment.datasets.length} 个数据集</span></div>
       ${experiment.datasets.map((dataset, datasetIndex) => datasetHTML(module, experiment, dataset, datasetIndex, state, scopedToExperiment)).join("")}`
@@ -92,18 +114,21 @@ function experimentHTML(report, module, experiment, state, scopedToExperiment = 
 function experimentSelectorHTML(module, experiment) {
   return `<div class="mm-experiment-bar"><div><strong>查看单个实验</strong><span>${module.experiments.length} 个实验</span></div>
     <label><span class="mm-sr-only">${esc(module.title)}：选择实验</span><select data-mm-select="${module.id}"
-      aria-label="${esc(module.title)}：选择实验" title="${esc(experiment.name)} · ${experiment.id}">${module.experiments.map(item =>
-      `<option value="${item.id}" ${item.id === experiment.id ? "selected" : ""}>${esc(item.name)} · ${item.id}${item.status === "success" ? "" : " · 数据不可用"}</option>`).join("")}</select></label></div>`;
+      aria-label="${esc(module.title)}：选择实验" title="${esc(experiment.name)} · ${esc(experimentLabel(experiment))}">${module.experiments.map(item =>
+      `<option value="${item.id}" ${item.id === experiment.id ? "selected" : ""}>${esc(item.name)} · ${esc(experimentLabel(item))}${item.status === "success" ? "" : " · 数据不可用"}</option>`).join("")}</select></label></div>`;
 }
 function reportExperimentHeader(report) {
   const range = (start, end) => start && end ? `${start} 至 ${end}` : "未提供";
-  return `<div class="mm-report-experiments" aria-label="报告实验信息">${report.snapshot.experiments.map(({ input, definition }) =>
-    `<dl class="meta mm-report-experiment" data-header-experiment="${esc(input.id)}">
+  return `<div class="mm-report-experiments" aria-label="报告实验信息">${report.snapshot.experiments.map(entry => {
+    const { input, definition } = entry;
+    return `<dl class="meta mm-report-experiment" data-header-experiment="${esc(reportExperimentKey(report.snapshot, entry))}">
       <div><dt>实验名称</dt><dd title="${esc(definition.name)}">${esc(definition.name)}</dd></div>
-      <div><dt>Libra ID</dt><dd>${esc(input.id)}</dd></div>
+      <div><dt>Libra ID</dt><dd>${esc(input.id)}</dd></div>${repeatedLibraId(report.snapshot, input.id) ? `
+      <div><dt>钱效实验 ID</dt><dd>${esc(selectedCandidateId(input, definition))}</dd></div>` : ""}
       <div><dt>实验周期</dt><dd>${esc(range(definition.period?.[0], definition.period?.[1]))}</dd></div>
       <div><dt>观察窗口</dt><dd>${esc(range(input.start, input.end))}</dd></div>
-    </dl>`).join("")}</div>`;
+    </dl>`;
+  }).join("")}</div>`;
 }
 export function renderMultiReport(report, view) {
   const modules = report.moduleContent || buildReportModules(report), failed = report.results.filter(result => result.status !== "success");
@@ -113,28 +138,44 @@ export function renderMultiReport(report, view) {
       : `<dl class="meta">${report.meta.map(([label, value]) => `<div><dt>${label}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl>`}
     <p class="mm-report-sub">生成时间：${new Date(report.createdAt).toLocaleString("zh-CN", { hour12: false })} · ${modules.length} 个分析模块${report.private ? " · 模块私有试跑" : ""}</p>
     ${multi ? reportExperimentHeader(report) : ""}
-    ${failed.length ? `<div class="ma-warning">部分完成：${failed.map(result => esc(`${result.id} ${result.error || "数据未完成"}`)).join("；")}${report.taskId ? ` <a href="#/experiments/task/${report.taskId}">返回任务</a>` : ""}</div>` : ""}
+    ${failed.length ? `<div class="ma-warning">部分完成：${failed.map(result => {
+      const entry = report.snapshot.experiments.find(entry => findExperimentResult(report.results, entry, report.snapshot) === result);
+      return esc(`${entry ? reportExperimentLabel(report.snapshot, entry) : result.id} ${result.error || "数据未完成"}`);
+    }).join("；")}${report.taskId ? ` <a href="#/experiments/task/${report.taskId}">返回任务</a>` : ""}</div>` : ""}
     ${report.snapshot.supplement ? `<details class="mm-supplement"><summary>用户补充信息</summary><p>${esc(report.snapshot.supplement)}</p></details>` : ""}</header>
     ${modules.map(module => {
       const state = moduleView(view, module), experiment = module.experiments.find(experiment => experiment.id === state.experimentId) || module.experiments[0];
       const cross = report.snapshot.analysisType === "multi" && module.analysisType === "multi";
+      const matrix = usesMatrix(report, module);
+      const detail = () => `${experimentSelectorHTML(module, experiment)}
+        ${experimentHTML(report, module, experiment, state, singleExperimentModule(report, module))}`;
       return `<section class="sec mm-module" id="sec-${module.id}" data-sec="${module.id}" data-mm-section="${module.id}" data-module-analysis-type="${module.analysisType}">
         <header class="mm-module-heading"><h2>${esc(module.title)}</h2><p>${esc(module.description)}</p></header>
         ${cross ? conclusionHTML("多实验分析结论", module.conclusions, module.id) : ""}
-        ${experimentSelectorHTML(module, experiment)}
-        ${experimentHTML(report, module, experiment, state, singleExperimentModule(report, module))}</section>`;
+        ${matrix ? `${experimentSelectorHTML(module, experiment)}
+          ${matrixSingleConclusionHTML(module, experiment)}
+          <div class="mm-data-heading">${svg("data")}<strong>数据明细</strong></div>
+          ${matrixHTML(module, state)}` : detail()}</section>`;
     }).join("")}`;
 }
 function scopeContext(report, scope, view) {
   const modules = report.moduleContent || buildReportModules(report);
   const module = modules.find(module => scope === module.id || scope?.startsWith(`${module.id}-`));
   if (!module) return { modules };
+  if (usesMatrix(report, module) && scope?.startsWith(`${module.id}-matrix-cell-`)) {
+    const evidence = findMatrixCell(module.comparison, scope.slice(`${module.id}-matrix-cell-`.length));
+    if (evidence) return { modules: [module], module, evidence,
+      experiment: module.experiments.find(experiment => experiment.id === evidence.column.experimentId) };
+  }
   const exact = module.experiments.find(experiment => scope === singleScope(module.index, experiment.id)
     || scope?.startsWith(`${singleScope(module.index, experiment.id)}-data-`));
-  const selected = scope?.includes("-data-") ? module.experiments.find(experiment => experiment.id === moduleView(view || {}, module).experimentId) : null;
+  const selected = !usesMatrix(report, module) && scope?.includes("-data-")
+    ? module.experiments.find(experiment => experiment.id === moduleView(view || {}, module).experimentId) : null;
   return { modules: [module], module, experiment: exact || selected };
 }
 export function multiSuggestions(report, scope) {
+  if (report.presentation === matrixPresentation && !scope?.includes("-exp-"))
+    return ["总结本模块各实验的表现差异", "哪些差异需要结合观察期和人群解释？", "核对表格中的指标口径与缺失项"];
   if (scope?.includes("-exp-") || scope?.includes("-data-")) return ["总结这个实验在本模块的表现", "这些指标如何计算，缺失值是什么原因？"];
   if (report.moduleContent?.find(module => module.id === scope)?.analysisType === "single")
     return ["逐个总结本模块各实验的结论", "核对各实验的数据来源与缺失项"];
@@ -142,6 +183,13 @@ export function multiSuggestions(report, scope) {
 }
 export function multiAnswer(report, question, scope = "all", view = {}) {
   const context = scopeContext(report, scope, view), lines = [];
+  if (context.evidence) {
+    const { dataset, column, cell } = context.evidence, field = dataset.fields.find(field => field.key === cell.evidence.metricKey);
+    return { steps: ["读取固定单元格证据", "核对实验、数据集、组别与指标"],
+      md: `本地模拟回答 · ${context.module.title} / ${column.experimentName}（${column.experimentLabel || column.experimentId}） / ${column.groupName}（${column.groupId}）。\n\n`
+        + `${dataset.title} · ${dataset.sourceName} v${cell.evidence.sourceVersion}；${field.name}：${cell.status === "value" ? cell.value : "—"} ${field.unit || ""}${cell.reason ? `（${cell.reason}）` : ""}。未重新计算结果。\n\n`
+        + `[[cite:${matrixEvidenceScope(cell.evidence)}::查看该单元格原始证据]]`, follow: multiSuggestions(report, scope) };
+  }
   for (const module of context.modules) {
     const experiments = context.experiment ? [context.experiment] : module.analysisType === "single"
       ? module.experiments : module.experiments.filter(experiment => experiment.status === "success");
@@ -150,8 +198,8 @@ export function multiAnswer(report, question, scope = "all", view = {}) {
       lines.push(...module.conclusions.map(conclusion => conclusion.text), `[[cite:${module.id}::查看多实验分析结论]]`);
     for (const experiment of experiments) {
       if (context.experiment || module.analysisType === "single" || /核对|计算|缺失/.test(question)) {
-        lines.push(`${experiment.name}（${experiment.id}）：`, ...(experiment.conclusions.length ? experiment.conclusions.map(conclusion => conclusion.text) : [experiment.error || "未提供分析结论"]),
-          `[[cite:${singleScope(module.index, experiment.id)}::查看该实验结论与数据]]`);
+        lines.push(`${experiment.name}（${experimentLabel(experiment)}）：`, ...(experiment.conclusions.length ? experiment.conclusions.map(conclusion => conclusion.text) : [experiment.error || "未提供分析结论"]),
+          `[[cite:${singleScope(module.index, experiment.id)}::${usesMatrix(report, module) ? "查看该实验分析结论" : "查看该实验结论与数据"}]]`);
       }
     }
     if (/计算|缺失/.test(question)) {
@@ -163,22 +211,25 @@ export function multiAnswer(report, question, scope = "all", view = {}) {
         : "计算使用各实验自己的对照组与本次观察窗口；未提供值保留缺失原因。显著性为模拟字段，不通过跨实验排序重新推断。");
     }
   }
-  const evidence = context.experiment ? `${context.module.title} / ${context.experiment.id}` : context.module ? `${context.module.title} / 全部成功实验` : "本报告各模块的成功实验";
+  const evidence = context.experiment ? `${context.module.title} / ${experimentLabel(context.experiment)}` : context.module ? `${context.module.title} / 全部成功实验` : "本报告各模块的成功实验";
   return { steps: ["读取固定模块快照", "核对当前实验与数据来源"], md: `本地模拟回答 · 证据范围：${evidence}。\n\n${lines.join("\n\n")}`, follow: multiSuggestions(report, scope) };
 }
 export function applyModuleReportEvent(event, report, view) {
+  const matrixChange = applyMatrixEvent(event, report, view);
+  if (matrixChange) return matrixChange;
   const target = event.target.closest("[data-mm-select],[data-mm-group],[data-mm-transpose]");
   if (!target) return false;
   if (target.dataset.mmSelect) {
     if (event.type !== "change") return false;
     const module = report.moduleContent.find(module => module.id === target.dataset.mmSelect);
     if (!module?.experiments.some(experiment => experiment.id === target.value)) return false;
-    moduleView(view, module).experimentId = target.value;
+    const state = moduleView(view, module);
+    state.experimentId = target.value;
     return { moduleId: module.id, focus: `[data-mm-select="${module.id}"]` };
   }
   if (event.type !== "click") return false;
   const module = report.moduleContent.find(module => module.id === target.dataset.mmModule), state = module && moduleView(view, module);
-  if (!state) return false;
+  if (!state || usesMatrix(report, module)) return false;
   const experimentId = target.dataset.mmExperiment || state.experimentId;
   const experiment = module.experiments.find(experiment => experiment.id === experimentId);
   if (!experiment?.datasets[Number(target.dataset.mmTable)]) return false;
@@ -197,8 +248,40 @@ export function prepareModuleCitation(report, scope, view) {
   const resolved = legacy[scope] || scope;
   const module = modules.find(module => resolved === module.id || resolved?.startsWith(`${module.id}-`));
   if (!module) return false;
+  if (usesMatrix(report, module)) {
+    const state = moduleView(view, module);
+    const { matrix } = matrixView(state, module.comparison);
+    const prefix = `${module.id}-matrix-cell-`;
+    if (resolved.startsWith(prefix)) return focusMatrixEvidence(module, state, resolved.slice(prefix.length));
+    if (resolved === module.id) return { scope: resolved, moduleId: module.id };
+    const experiment = module.experiments.find(experiment => resolved === singleScope(module.index, experiment.id)
+      || resolved.startsWith(`${singleScope(module.index, experiment.id)}-data-`));
+    if (experiment && resolved === singleScope(module.index, experiment.id)) {
+      state.experimentId = experiment.id;
+      return { scope: resolved, moduleId: module.id };
+    }
+    const matrixIndex = resolved.startsWith(`${module.id}-matrix-data-`)
+      ? Number(resolved.slice(`${module.id}-matrix-data-`.length)) : -1;
+    let dataset = module.comparison.datasets[matrixIndex];
+    if (!dataset && resolved.includes("-data-") && matrixIndex === -1) {
+      const selected = experiment || module.experiments.find(item => item.id === state.experimentId);
+      const original = selected?.datasets.find((_, index) => resolved === datasetScope(module.index, index, experiment?.id));
+      if (original) dataset = module.comparison.datasets.find(item => item.key === matrixDatasetKey(original));
+    }
+    if (dataset) matrix.datasetKey = dataset.key;
+    if (experiment) {
+      const active = matrixView(state, module.comparison).dataset;
+      const column = active?.columns.find(item => item.experimentId === experiment.id && !item.control)
+        || active?.columns.find(item => item.experimentId === experiment.id);
+      if (column) return focusMatrixEvidence(module, state, Object.values(column.cells)[0].token);
+    }
+    return { scope: dataset ? `${module.id}-matrix-data-${module.comparison.datasets.indexOf(dataset)}` : `${module.id}-matrix`, moduleId: module.id };
+  }
   const experiment = module.experiments.find(experiment => resolved === singleScope(module.index, experiment.id)
     || resolved?.startsWith(`${singleScope(module.index, experiment.id)}-data-`));
-  if (experiment) moduleView(view, module).experimentId = experiment.id;
+  if (experiment) {
+    const state = moduleView(view, module);
+    state.experimentId = experiment.id;
+  }
   return { scope: resolved, moduleId: module.id };
 }

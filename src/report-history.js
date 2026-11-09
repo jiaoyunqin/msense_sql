@@ -239,6 +239,7 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
       <button class="sel-ask" id="selAsk" hidden>${ic("sparkles", 14)}追问这段</button>
       ${report.moduleReport ? `<button class="mm-agent-launcher" id="aiShow" type="button" aria-label="打开报告助手">${ic("sparkles", 18)}<span>AI</span></button>` : ""}`;
     renderAgent(); autoGrow();
+    $$("[data-indeterminate]").forEach(input => { input.indeterminate = true; });
     $("#view").addEventListener("scroll", () => { syncToc(); positionPopup(); positionSelection(); }, { passive: true });
     syncToc();
   }
@@ -251,19 +252,37 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
     const replacement = change?.moduleId && container.querySelector(`[data-mm-section="${change.moduleId}"]`);
     if (current && replacement) {
       const top = $("#view").scrollTop;
+      const focused = document.activeElement;
+      const selection = focused?.matches("[data-matrix-search]") ? [focused.selectionStart, focused.selectionEnd] : null;
+      const scrolls = [...current.querySelectorAll(".mx-scroll")].map(element => [element.scrollLeft, element.scrollTop]);
       const fullscreenId = current.querySelector(".tblock.fs")?.id;
       const expandedNotes = [...current.querySelectorAll("details")].map(details => details.open);
+      const matrixDetails = new Map([...current.querySelectorAll("[data-matrix-details]")].map(details => [details.dataset.matrixDetails, details.open]));
       current.replaceWith(replacement);
       if (fullscreenId) {
         const fullscreen = replacement.querySelector(`#${fullscreenId}`);
         fullscreen?.classList.add("fs");
         fullscreenAnchor = fullscreen?.querySelector("[data-fs]");
-        if (!fullscreen) $(".fs-mask")?.remove();
+        if (!fullscreen) { $(".fs-mask")?.remove(); fullscreenAnchor = undefined; }
       }
-      replacement.querySelectorAll("details").forEach((details, index) => { details.open = expandedNotes[index] || false; });
+      replacement.querySelectorAll("details").forEach((details, index) => {
+        details.open = details.dataset.matrixDetails ? matrixDetails.get(details.dataset.matrixDetails) || false : expandedNotes[index] || false;
+      });
+      replacement.querySelectorAll(".mx-scroll").forEach((element, index) => {
+        if (scrolls[index]) [element.scrollLeft, element.scrollTop] = scrolls[index];
+      });
       $("#view").scrollTop = top;
+      if (selection && change?.focus) {
+        const input = replacement.querySelector(change.focus);
+        input?.setSelectionRange?.(...selection);
+      }
     } else $("#report").replaceChildren(...container.childNodes);
+    $$("[data-indeterminate]").forEach(input => { input.indeterminate = true; });
     if (change?.focus) $(change.focus)?.focus({ preventScroll: true });
+    if (change?.scroll) {
+      const target = (change.focus && $(change.focus)) || (change.scope && $(`#sec-${CSS.escape(change.scope)}`));
+      target?.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
+    }
     syncToc();
   }
   const suggestions = scope => extensions()?.suggestions?.(report, scope) || suggFor(scope);
@@ -442,7 +461,7 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
     const change = extensions()?.beforeGoto?.(report, scope);
     if (change) { scope = change.scope || scope; refreshBody(change); }
     const section = $(`#sec-${scope}`);
-    const target = block ? section?.querySelector(`[data-bid="${block}"]`) || section : section;
+    const target = change?.focus ? $(change.focus) || section : block ? section?.querySelector(`[data-bid="${block}"]`) || section : section;
     if (!target) return;
     if (narrow()) setExpanded(false);
     target.scrollIntoView({ block: block ? "center" : "start", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
@@ -476,12 +495,19 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
   }
 
   root.addEventListener("input", e => {
+    const change = extensions()?.handleEvent?.(e, report);
+    if (change) { refreshBody(change); return; }
     if (e.target.id === "report-search") { filters.kw = e.target.value; renderCards(); }
     if (e.target.id === "aiText") { session().draft = e.target.value; save(); autoGrow(); renderModelControls(); updateSend(); }
     if (e.target.closest(".pop-in")) {
       const submit = popup?.querySelector('[type="submit"]');
       if (submit) submit.disabled = !e.target.value.trim() || tasks.has(taskKey("chat"));
     }
+  });
+  root.addEventListener("focusin", e => {
+    if (!e.target.matches("[data-matrix-cell]")) return;
+    const change = extensions()?.handleEvent?.(e, report);
+    if (change) refreshBody(change);
   });
   root.addEventListener("change", e => {
     const change = extensions()?.handleEvent?.(e, report);
