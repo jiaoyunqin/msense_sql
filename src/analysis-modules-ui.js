@@ -7,44 +7,60 @@ import {
 } from "./analysis-module-data.js";
 import { runModule } from "./analysis-module-runner.js";
 import "./analysis-modules.css";
+// Share the online catalog presentation with the report template list.
+import "./report-template-catalog.css";
 
 const esc = (value = "") => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const icon = (name) => `<i data-lucide="${name}"></i>`;
 const button = (action, text, name = "", extra = "", cls = "") => `<button type="button" class="am-button ${cls}" data-action="mod-${action}" ${extra}>${name ? icon(name) : ""}${text}</button>`;
 const stateNames = { draft: "草稿", online: "已上线", offline: "已下线" };
 const time = (value) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }).replaceAll("/", "-") : "";
+const listTime = (value) => {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return "—";
+  const pad = number => String(number).padStart(2, "0");
+  return `${date.getFullYear()}/${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
 const field = (title, key, value, placeholder = "") => `<label class="am-field"><span>${title}</span><input data-model="mod-field.${key}" value="${esc(value)}" placeholder="${esc(placeholder)}"></label>`;
 const area = (title, key, value, placeholder = "") => `<label class="am-field am-area"><span>${title}</span><textarea data-model="mod-field.${key}" placeholder="${esc(placeholder)}">${esc(value)}</textarea></label>`;
 
 export function createAnalysisModules({ store, outlet, main, persist, showToast, openDialog, closeDialog, render }) {
   initializeModules(store);
   let search = "", creator = "", state = "all", type = "all", sort = "updated", errors = [], running = false;
+  let page = 1, pageSize = 20;
   const creatorOf = module => String(module.createdBy || "").trim();
+  const creatorLabel = module => module.createdByName || (creatorOf(module) === currentActor ? "秦娇芸" : creatorOf(module)) || "—";
+  const listSelect = (model, label, entries, value) => `<label class="ma-template-select"><select data-model="mod-${model}" aria-label="${label}">${entries.map(([key, name]) => `<option value="${key}" ${key === value ? "selected" : ""}>${name}</option>`).join("")}</select>${icon("chevron-down")}</label>`;
   function activate(id) {
     const module = store.modules.find((entry) => entry.id === id);
     if (module) store.analysis = module;
     return module;
   }
   function renderList() {
-    const modules = store.modules.filter((module) => !module.archived);
-    outlet.innerHTML = `<div class="am-list-page">
-      <header class="am-list-header"><div><h1>实验分析模块</h1><p>${modules.length} 项有效配置</p></div>${button("new", "新建实验分析模块", "plus", "", "primary")}</header>
-      <div class="am-toolbar"><div class="am-filters"><label class="am-search">${icon("search")}<input type="search" data-model="mod-search" aria-label="搜索模块名称或说明" placeholder="搜索名称或说明" value="${esc(search)}"></label>
-      <details class="am-multi-select am-creator-filter"><summary aria-label="按创建人筛选"><span>${esc(creator || "全部创建人")}</span>${icon("chevron-down")}</summary>
-        <div class="am-picker-menu"><label class="am-search">${icon("search")}<input type="search" data-model="mod-creator-search" aria-label="搜索创建人" placeholder="搜索创建人"></label>
-          <div class="am-creator-options" role="listbox" aria-label="创建人"></div></div></details>
-      <select data-model="mod-state" aria-label="模块状态">${[["all", "全部有效状态"], ["online", "已上线"], ["draft", "草稿"], ["offline", "已下线"]].map(([value, name]) => `<option value="${value}" ${state === value ? "selected" : ""}>${name}</option>`).join("")}</select>
-      <select data-model="mod-type" aria-label="模块分析类型">${[["all", "全部分析类型"], ["single", "单实验分析"], ["multi", "多实验分析"]].map(([value, name]) => `<option value="${value}" ${type === value ? "selected" : ""}>${name}</option>`).join("")}</select>
-      <select data-model="mod-sort" aria-label="模块排序"><option value="updated" ${sort === "updated" ? "selected" : ""}>最近更新</option><option value="name" ${sort === "name" ? "selected" : ""}>名称排序</option></select></div>
-      <p class="am-result-count"></p></div><div class="am-module-grid"></div></div>`;
+    const creatorName = creatorLabel(store.modules.find(module => creatorOf(module) === creator) || {});
+    outlet.innerHTML = `<div class="am-list-page ma-template-catalog">
+      <header class="am-list-header ma-page-header"><h1>实验分析模块</h1>${button("new", "新建实验分析模块", "plus", "", "ma-button primary")}</header>
+      <div class="ma-template-filters" role="search" aria-label="筛选实验分析模块"><label class="ma-template-search">${icon("search")}<input type="search" data-model="mod-search" aria-label="搜索模块名称或说明" placeholder="搜索名称或说明" value="${esc(search)}"></label>
+      <details class="am-multi-select am-creator-filter ma-template-creator"><summary aria-label="按创建人筛选"><span>${esc(creator ? creatorName : "全部创建人")}</span>${icon("chevron-down")}</summary>
+        <div class="ma-template-creator-menu"><label class="ma-template-search">${icon("search")}<input type="search" data-model="mod-creator-search" aria-label="搜索创建人" placeholder="搜索创建人"></label>
+          <div class="am-creator-options ma-template-creator-options" role="listbox" aria-label="创建人"></div></div></details>
+      ${listSelect("state", "模块状态", [["all", "全部有效状态"], ["online", "已上线"], ["draft", "草稿"], ["offline", "已下线"]], state)}
+      ${listSelect("type", "模块分析类型", [["all", "全部分析类型"], ["single", "单实验分析"], ["multi", "多实验分析"]], type)}
+      ${listSelect("sort", "模块排序", [["updated", "最近更新"], ["name", "名称排序"]], sort)}</div>
+      <section class="ma-template-results" aria-label="实验分析模块列表"><div class="ma-template-table-scroll" role="region" aria-label="实验分析模块表格" tabindex="0">
+        <table class="am-module-table ma-template-table" aria-label="实验分析模块列表"><colgroup><col><col class="ma-col-goal"><col class="ma-col-app"><col class="ma-col-status"><col class="ma-col-creator"><col class="ma-col-time"><col class="ma-col-actions"></colgroup>
+          <thead><tr><th scope="col">名称与说明 <span class="am-result-count ma-template-count" aria-live="polite"></span></th><th scope="col">业务目标</th><th scope="col">适用端</th><th scope="col">状态</th><th scope="col">创建人</th><th scope="col">更新时间</th><th scope="col">操作</th></tr></thead><tbody></tbody></table></div>
+        <nav class="ma-template-pagination" aria-label="实验分析模块分页">${listSelect("page-size", "每页条数", [10, 20, 50, 100].map(size => [String(size), `${size} 条 / 页`]), String(pageSize))}
+          <span class="am-page-info ma-template-page-info" aria-live="polite"></span><div>${button("prev-page", "", "chevron-left", 'aria-label="上一页"', "ma-button ma-template-page-button")}${button("next-page", "", "chevron-right", 'aria-label="下一页"', "ma-button ma-template-page-button")}</div></nav></section></div>`;
     renderCreatorOptions();
     renderListResults();
   }
   function renderCreatorOptions(query = "") {
-    const creators = [...new Set(store.modules.filter(module => !module.archived).map(creatorOf).filter(Boolean))]
-      .sort((a, b) => a.localeCompare(b, "zh-CN"))
-      .filter(name => name.toLowerCase().includes(query.trim().toLowerCase()));
-    outlet.querySelector(".am-creator-options").innerHTML = [["", "全部创建人"], ...creators.map(name => [name, name])]
+    const creators = [...new Map(store.modules.filter(module => !module.archived && creatorOf(module))
+      .map(module => [creatorOf(module), creatorLabel(module)])).entries()]
+      .sort((a, b) => a[1].localeCompare(b[1], "zh-CN"))
+      .filter(([id, name]) => `${id} ${name}`.toLowerCase().includes(query.trim().toLowerCase()));
+    outlet.querySelector(".am-creator-options").innerHTML = [["", "全部创建人"], ...creators]
       .map(([value, name]) => `<button type="button" role="option" aria-selected="${creator === value}" data-action="mod-filter-creator" data-creator="${esc(value)}"><span>${esc(name)}</span>${creator === value ? icon("check") : ""}</button>`).join("")
       + (creators.length ? "" : '<p class="am-creator-empty" role="status">未找到匹配的创建人</p>');
     createIcons({ icons });
@@ -53,25 +69,30 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
     const modules = store.modules.filter((module) => !module.archived
       && (!creator || creatorOf(module) === creator)
       && (state === "all" || moduleState(module) === state)
-      && (type === "all" || module.analysisType === type)
-      && `${module.name} ${module.description}`.toLowerCase().includes(search.toLowerCase()))
+      && (type === "all" || (module.analysisType || "single") === type)
+      && `${module.name} ${module.description}`.toLowerCase().includes(search.trim().toLowerCase()))
       .sort((a, b) => sort === "name" ? a.name.localeCompare(b.name, "zh-CN")
         : (b.updatedAt || b.savedAt || "").localeCompare(a.updatedAt || a.savedAt || ""));
+    const pages = Math.max(1, Math.ceil(modules.length / pageSize));
+    page = Math.min(Math.max(1, page), pages);
     outlet.querySelector(".am-result-count").textContent = `${modules.length} 项`;
-    outlet.querySelector(".am-module-grid").innerHTML = modules.map((module) => {
-      const status = moduleState(module);
-      return `<article class="am-module-card" data-module-id="${module.id}">
-        <div class="am-card-top"><span class="am-module-icon">${icon("flask-conical")}</span><span class="am-state ${status}">${stateNames[status]}</span></div>
-        <a class="am-card-title" href="#/modules/${module.id}">${esc(module.name || "未命名实验分析模块")}</a>
-        <p class="am-card-description">${esc(module.description)}</p>
-        <div class="am-tags"><span>${module.analysisType === "multi" ? "多实验分析" : "单实验分析"}</span><span>${businessGoal}</span><span>${esc(module.apps.join("、") || "不限端")}</span></div>
-        <footer>${module.updatedAt || module.savedAt ? `<small>更新于 ${esc(time(module.updatedAt || module.savedAt))}</small>` : "<span></span>"}
-        <div class="am-card-actions">${button("copy", "", "copy", `data-id="${module.id}" aria-label="复制${esc(module.name)}" title="复制"`)}
-        <a href="#/modules/${module.id}" class="am-button">${icon("pencil")}编辑</a>
-        ${button("toggle-state", status === "online" ? "下线" : "上线", "", `data-id="${module.id}"`)}
-        ${button("archive", "", "archive", `data-id="${module.id}" aria-label="归档${esc(module.name)}" title="归档"`)}
-        </div></footer></article>`;
-    }).join("") || `<div class="am-empty">未找到匹配的实验分析模块</div>`;
+    outlet.querySelector(".am-module-table tbody").innerHTML = modules.slice((page - 1) * pageSize, page * pageSize).map(module => {
+      const status = moduleState(module), name = module.name || "未命名实验分析模块";
+      const id = esc(module.id), person = creatorLabel(module), updatedAt = module.updatedAt || module.savedAt || "";
+      return `<tr data-module-id="${id}" data-analysis-type="${esc(module.analysisType || "single")}">
+        <th scope="row"><a class="ma-template-name" href="#/modules/${id}" title="${esc(name)}">${esc(name)}</a>${module.description ? `<p class="ma-template-description" title="${esc(module.description)}">${esc(module.description)}</p>` : ""}</th>
+        <td>${esc(module.goal || businessGoal)}</td><td>${esc(module.apps?.join("、") || "不限端")}</td>
+        <td><span class="ma-template-status ${status}"${module.versions.length ? ` title="已发布 v${module.versions.at(-1).number}"` : ""}>${stateNames[status]}</span></td>
+        <td><span class="ma-template-person" title="${esc(creatorOf(module) || person)}"><span class="ma-template-avatar" aria-hidden="true">${esc(person === "—" ? "?" : [...person][0])}</span><span>${esc(person)}</span></span></td>
+        <td><time${updatedAt ? ` datetime="${esc(updatedAt)}"` : ""}>${listTime(updatedAt)}</time></td>
+        <td><div class="am-row-actions ma-template-row-actions">${button("copy", "", "copy", `data-id="${id}" aria-label="复制${esc(name)}" title="复制"`, "ma-button am-icon-action")}
+          <a href="#/modules/${id}" aria-label="编辑${esc(name)}">${icon("pencil")}编辑</a>
+          ${button("toggle-state", status === "online" ? "下线" : "上线", "", `data-id="${id}" aria-label="${status === "online" ? "下线" : "上线"}${esc(name)}"`, "ma-button")}
+          ${button("archive", "", "archive", `data-id="${id}" aria-label="归档${esc(name)}" title="归档"`, "ma-button am-icon-action")}</div></td></tr>`;
+    }).join("") || `<tr><td colspan="7"><div class="ma-template-empty" role="status">${icon("search")}<p>未找到匹配的实验分析模块</p>${button("reset-filters", "清空筛选", "", "", "ma-button text")}</div></td></tr>`;
+    outlet.querySelector(".am-page-info").textContent = `第 ${page} / ${pages} 页`;
+    outlet.querySelector('[data-action="mod-prev-page"]').disabled = page === 1;
+    outlet.querySelector('[data-action="mod-next-page"]').disabled = page === pages;
     createIcons({ icons });
   }
   function options() {
@@ -245,10 +266,18 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
   }
   async function handleAction(trigger) {
     const action = trigger.dataset.action.slice(4), id = trigger.dataset.id;
+    if (action === "prev-page" || action === "next-page") {
+      page += action === "prev-page" ? -1 : 1;
+      renderListResults(); return;
+    }
+    if (action === "reset-filters") {
+      search = ""; creator = ""; state = "all"; type = "all"; sort = "updated"; page = 1;
+      renderList(); outlet.querySelector('[data-model="mod-search"]').focus(); return;
+    }
     if (action === "filter-creator") {
-      creator = trigger.dataset.creator;
+      creator = trigger.dataset.creator; page = 1;
       const menu = outlet.querySelector(".am-creator-filter");
-      menu.querySelector("summary > span").textContent = creator || "全部创建人";
+      menu.querySelector("summary > span").textContent = creator ? creatorLabel(store.modules.find(module => creatorOf(module) === creator) || {}) : "全部创建人";
       menu.querySelector("input").value = "";
       renderCreatorOptions();
       renderListResults();
@@ -370,9 +399,10 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
     if (!model?.startsWith("mod-")) return false;
     const change = el.type === "checkbox" || el.tagName === "SELECT";
     if (change && event.type !== "change" || !change && event.type !== "input") return true;
-    if (model === "mod-search") { search = el.value; renderListResults(); return true; }
+    if (model === "mod-search") { search = el.value; page = 1; renderListResults(); return true; }
     if (model === "mod-creator-search") { renderCreatorOptions(el.value); return true; }
-    if (model === "mod-state" || model === "mod-sort" || model === "mod-type") { if (model === "mod-state") state = el.value; else if (model === "mod-type") type = el.value; else sort = el.value; renderListResults(); return true; }
+    if (model === "mod-page-size") { pageSize = Number(el.value); page = 1; renderListResults(); return true; }
+    if (model === "mod-state" || model === "mod-sort" || model === "mod-type") { if (model === "mod-state") state = el.value; else if (model === "mod-type") type = el.value; else sort = el.value; page = 1; renderListResults(); return true; }
     const module = store.analysis;
     if (model === "mod-calc-search") {
       const picker = el.closest(".am-calc-picker"), query = el.value.trim().toLowerCase();

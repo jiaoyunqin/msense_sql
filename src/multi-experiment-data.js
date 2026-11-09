@@ -54,14 +54,30 @@ export const demoExperiments = [
     ] }
 ];
 export const findExperiment = id => demoExperiments.find(experiment => experiment.id === id);
+export function experimentCandidates(id) {
+  const experiment = findExperiment(id);
+  if (!experiment) return [];
+  const primary = { ...experiment, qxExperimentId: `${id}-QX-01` };
+  // Fictional mappings exercise the same candidate-selection flow as the live site.
+  return id === "DEMO-001" ? [primary,
+    { ...experiment, qxExperimentId: `${id}-QX-02`, period: ["2026-10-01", "2026-10-07"] }] : [primary];
+}
+export function resolveExperiment(input) {
+  const candidates = experimentCandidates(input.id);
+  // Existing saved inputs did not store a money-efficiency experiment ID.
+  return input.qxExperimentId === undefined ? candidates[0]
+    : candidates.find(experiment => experiment.qxExperimentId === input.qxExperimentId);
+}
 export function parseExperimentIds(text) {
   const tokens = String(text).trim().split(/[\s,，;；]+/).filter(Boolean).map(id => id.toUpperCase());
   const ids = [...new Set(tokens)];
   return { ids, duplicates: tokens.length - ids.length };
 }
-export function experimentInput(id) {
-  const experiment = findExperiment(id);
-  return { id, start: experiment?.period[0] || "", end: experiment?.period[1] || "",
+export function experimentInput(id, { requireSelection = false, qxExperimentId } = {}) {
+  const candidates = experimentCandidates(id);
+  const selectedId = qxExperimentId ?? (requireSelection && candidates.length > 1 ? "" : candidates[0]?.qxExperimentId);
+  const experiment = candidates.find(candidate => candidate.qxExperimentId === selectedId);
+  return { id, qxExperimentId: selectedId || "", start: experiment?.period[0] || "", end: experiment?.period[1] || "",
     groupIds: experiment?.groups.map(group => group.id) || [] };
 }
 export function dateStamp(value) {
@@ -74,14 +90,15 @@ export function observedDays(start, end) {
   return a === null || b === null || a > b ? null : (b - a) / 86400000 + 1;
 }
 export function experimentIssues(input, goal = demoGoal) {
-  const experiment = findExperiment(input.id), errors = [];
-  if (!experiment) return ["未找到实验。Demo 支持 DEMO-001、DEMO-002、DEMO-003。"];
+  const candidates = experimentCandidates(input.id), experiment = resolveExperiment(input), errors = [];
+  if (!candidates.length) return ["未找到实验。Demo 支持 DEMO-001、DEMO-002、DEMO-003。"];
+  if (!experiment) return [input.qxExperimentId ? "钱效实验候选项无效，请重新选择。" : "该实验 ID 匹配多个钱效实验，请先选择。"];
   if (experiment.goal !== goal) errors.push("实验业务目标与当前分析不一致。");
   if (!observedDays(input.start, input.end)) errors.push("请填写有效观察日期，开始日期不能晚于结束日期。");
   else if (input.start < experiment.available[0] || input.end > experiment.available[1])
     errors.push(`模拟数据仅覆盖 ${experiment.available.join(" 至 ")}，请调整观察窗口。`);
-  if (!input.groupIds.length) errors.push("请选择至少一个策略组。");
-  if (input.groupIds.some(id => !experiment.groups.some(group => group.id === id)))
+  if (!input.groupIds?.length) errors.push("实验策略组配置缺失，请重新解析该实验。");
+  if (input.groupIds?.some(id => !experiment.groups.some(group => group.id === id)))
     errors.push("所选策略组不属于该实验。");
   return errors;
 }
@@ -315,7 +332,7 @@ export function createAnalysisTask(store, draft, { trialModule = null } = {}) {
       templateId: trialModule || selectedModules.length ? "" : template.id,
       templateVersion: trialModule || selectedModules.length ? 0 : version.number, template: configuration,
       modules: moduleVersions, experiments: draft.experiments.map(input => {
-        const definition = copy(findExperiment(input.id));
+        const definition = copy(resolveExperiment(input));
         if (moduleVersions.some(module => module.configuration.sources.some(source => source.capabilityId === "pre-aa")))
           definition.preAA = createPreAAEvidence(definition, input);
         return { input, definition };

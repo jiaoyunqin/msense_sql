@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {
-  copy, comparisonMetrics, demoExperiments, findExperiment, experimentInput, parseExperimentIds, experimentIssues,
+  copy, comparisonMetrics, demoExperiments, findExperiment, experimentCandidates, resolveExperiment, experimentInput, parseExperimentIds, experimentIssues,
   observedDays, initializeMultiAnalysis, templateIssues, templateStatus, templateChanged, setTemplateEnabled, publishTemplate, newTemplate, publishedTemplates,
   workbenchModuleOptions, workbenchIssues, createAnalysisTask, executeAnalysisTask, createTaskReport, comparisonBoundaries,
   deriveGroup, deriveBreakdowns, reportMetrics
@@ -34,6 +34,38 @@ check("未知身份、非法日期、反向窗口和无策略组被拦截", () =
 check("实验期后追踪允许，未覆盖窗口准确拦截", () => {
   assert.equal(experimentIssues({ ...experimentInput("DEMO-001"), end: "2026-10-20" }).length, 0);
   assert(experimentIssues({ ...experimentInput("DEMO-001"), end: "2026-11-20" }).length);
+});
+check("多匹配必须选择，未知或跨实验候选不能发起分析；旧输入兼容", () => {
+  const pending = experimentInput("DEMO-001", { requireSelection: true });
+  assert.equal(pending.start, "");
+  assert.equal(resolveExperiment(pending), undefined);
+  assert(experimentIssues(pending).some(issue => issue.includes("请先选择")));
+  assert.throws(() => createAnalysisTask(copy(store), { ...draft, experiments: [pending, draft.experiments[1]] }));
+  for (const qxExperimentId of ["UNKNOWN", experimentCandidates("DEMO-002")[0].qxExperimentId]) {
+    const invalid = experimentInput("DEMO-001", { qxExperimentId });
+    assert(experimentIssues(invalid).some(issue => issue.includes("候选项无效")));
+    assert.throws(() => createAnalysisTask(copy(store), { ...draft, experiments: [invalid, draft.experiments[1]] }));
+  }
+  const legacy = experimentInput("DEMO-001");
+  delete legacy.qxExperimentId;
+  assert.equal(experimentIssues(legacy).length, 0);
+  assert.deepEqual(resolveExperiment(legacy).period, findExperiment("DEMO-001").period);
+});
+check("所选钱效实验与逐实验日期进入快照，切换候选不污染其他实验或旧任务", () => {
+  const isolated = copy(store), inputs = copy(draft.experiments);
+  const other = JSON.stringify(inputs.slice(1));
+  const candidate = experimentCandidates("DEMO-001")[1];
+  inputs[0] = experimentInput("DEMO-001", { qxExperimentId: candidate.qxExperimentId });
+  assert.deepEqual([inputs[0].start, inputs[0].end], candidate.period);
+  inputs[0].end = "2026-10-20";
+  const task = createAnalysisTask(isolated, { ...draft, experiments: inputs });
+  assert.equal(task.snapshot.experiments[0].definition.qxExperimentId, candidate.qxExperimentId);
+  assert.deepEqual(task.snapshot.experiments[0].definition.period, candidate.period);
+  assert.equal(task.snapshot.experiments[0].input.end, "2026-10-20");
+  Object.assign(inputs[0], experimentInput("DEMO-001"));
+  assert.equal(JSON.stringify(inputs.slice(1)), other);
+  assert.equal(task.snapshot.experiments[0].definition.qxExperimentId, candidate.qxExperimentId);
+  assert.equal(task.snapshot.experiments[0].input.end, "2026-10-20");
 });
 check("多实验要求不同实验；单实验不能替代多实验", () => {
   assert(workbenchIssues(store, { ...draft, experiments: [draft.experiments[0]] }).length);

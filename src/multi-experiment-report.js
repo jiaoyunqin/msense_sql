@@ -108,10 +108,11 @@ function reportExperimentHeader(report) {
 export function renderMultiReport(report, view) {
   const modules = report.moduleContent || buildReportModules(report), failed = report.results.filter(result => result.status !== "success");
   const multi = report.snapshot.analysisType === "multi";
-  return `<header class="rhead mm-report-header"><p class="eyebrow">实验分析报告 <span class="ma-demo-tag">${report.snapshot.analysisType === "multi" ? "多实验" : "单实验"} · 模拟数据</span></p><h1>${esc(report.title)}</h1>
-    ${multi ? reportExperimentHeader(report) : `<dl class="meta">${report.meta.map(([label, value]) => `<div><dt>${label}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl>`}
-    ${multi ? `<div class="mm-report-context">${report.meta.map(([label, value]) => `<span>${esc(label)}：${esc(value)}</span>`).join("")}</div>` : ""}
+  return `<header class="rhead mm-report-header"><p class="eyebrow">实验分析报告 <span class="ma-demo-tag">分析类型：${esc(analysisTypes[report.snapshot.analysisType])}</span></p><h1>${esc(report.title)}</h1>
+    ${multi ? `<div class="mm-report-context">${report.meta.filter(([label]) => label !== "分析类型").map(([label, value]) => `<span>${esc(label)}：${esc(value)}</span>`).join("")}</div>`
+      : `<dl class="meta">${report.meta.map(([label, value]) => `<div><dt>${label}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl>`}
     <p class="mm-report-sub">生成时间：${new Date(report.createdAt).toLocaleString("zh-CN", { hour12: false })} · ${modules.length} 个分析模块${report.private ? " · 模块私有试跑" : ""}</p>
+    ${multi ? reportExperimentHeader(report) : ""}
     ${failed.length ? `<div class="ma-warning">部分完成：${failed.map(result => esc(`${result.id} ${result.error || "数据未完成"}`)).join("；")}${report.taskId ? ` <a href="#/experiments/task/${report.taskId}">返回任务</a>` : ""}</div>` : ""}
     ${report.snapshot.supplement ? `<details class="mm-supplement"><summary>用户补充信息</summary><p>${esc(report.snapshot.supplement)}</p></details>` : ""}</header>
     ${modules.map(module => {
