@@ -262,8 +262,22 @@
 
 /* Reports follow the template's module hierarchy. Each module owns its experiment selection. */
 #report-history.module-report {
-  .reference-summary .ccard { padding: 18px 20px; }
-  .reference-summary h4 { font-weight: 600; }
+  /* Core conclusions follow the production report's analysis card and prose. */
+  .reference-summary .ccard { padding: 16px; margin-top: 0; box-shadow: 0 1px 2px rgb(0 0 0 / 5%); }
+  .reference-summary .ccard-h { gap: 12px; }
+  .reference-summary .ccard-h .t { margin: 0; min-width: 0; gap: 8px; font-size: 14px; font-weight: 400; line-height: 20px; }
+  .reference-summary .summary-chart { width: 16px; height: 16px; color: var(--accent); }
+  .reference-summary .ask-btn { flex: none; min-width: 56px; height: 28px; padding: 3px 7px; gap: 4px; border-radius: 7px; background: var(--surface); border-color: var(--border); font-size: 12.8px; line-height: 18.2857px; }
+  .reference-summary .ask-btn:hover { background: var(--soft); border-color: var(--border); }
+  .reference-summary .ask-btn.on { color: var(--accent); background: var(--soft); }
+  .reference-summary .summary-ai-mark { width: 18px; height: 18px; flex: none; }
+  .report-summary-body { margin-top: 8px; font-size: 14px; line-height: 20px; overflow-wrap: anywhere; }
+  .report-summary-body p { margin: 6px 0 10px; line-height: 20px; }
+  .report-summary-body > p:first-child, .report-summary-body strong { font-weight: 700; }
+  .report-summary-body h4 { margin: 6px 0 10px; font-size: 14px; line-height: 20px; font-weight: 700; }
+  .report-summary-body ul { margin: 6px 0 10px; padding-left: 22px; }
+  .report-summary-body li { margin: 0; line-height: 20px; }
+  .report-summary-body li + li { margin-top: 4px; }
   .reference-module { margin-top: 32px; }
   .reference-table .lead { min-width: 160px; max-width: 250px; white-space: normal; }
   .reference-table th.lead { font-weight: 400; text-align: left; }

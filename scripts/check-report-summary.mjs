@@ -168,8 +168,8 @@ check("共用卡片保留单实验标题、正文层级与 AI 入口，并转义
   assert(html.includes('class="sec reference-summary"'));
   assert(html.includes('class="ccard-h"') && html.includes('data-ask="summary"'));
   assert(html.includes('aria-label="向 AI 提问：实验核心结论"'));
-  assert(html.includes("<h4>发现</h4>") && html.includes("<ul><li>&lt;script&gt;</li></ul>"));
-  assert(html.includes("<p>&lt;img src=x&gt;</p>") && html.includes("<p>正文</p>"));
+  assert(html.includes("<h4>发现</h4>") && html.includes("<ul><li><p>&lt;script&gt;</p></li></ul>"));
+  assert(html.includes('<p class="summary-lead"><strong>&lt;img src=x&gt;</strong></p>') && html.includes("<p>正文</p>"));
   assert(!html.includes("<script>") && !html.includes("<img"));
 });
 
