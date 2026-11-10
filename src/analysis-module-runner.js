@@ -3,6 +3,7 @@ import { runAnalysis } from "./composer-engine.js";
 import { sourceDefinition, moduleIssues, moduleConfiguration } from "./analysis-module-data.js";
 import { computeModuleCalculations, localCalculationContext, comparisonCalculationRecords } from "./analysis-module-calculation-runtime.js";
 import { findExperiment, experimentInput, experimentIssues, deriveGroup, deriveBreakdowns } from "./multi-experiment-data.js";
+import { applyModuleRecordOrder } from "./analysis-module-report-order.js";
 
 function fixedRpcRecords(store, module, source) {
   const definition = sourceDefinition(store, source);
@@ -60,7 +61,7 @@ function fixedRpcRecords(store, module, source) {
       ...(!overall ? [["dimension_value", "fixed-sample-bucket"]] : []),
       ...metrics.map((field) => [field.key, sampleValue(field, groupIndex)])
     ]));
-    return { id, modeName: `${definition.name} · ${dimension.name}`, sourceId: source.id,
+    return { id, modeId: dimension.key, modeName: `${definition.name} · ${dimension.name}`, sourceId: source.id,
       status: "success", fields, rawRows, fixedSample: true, context: clone(module.context),
       calculationContext: localCalculationContext(source, dimension.key, module.context, dimensionFields, dimension.calculationGrain),
       snapshot: { members: [], sql: "", fields }, renderedSql: "",
@@ -123,6 +124,7 @@ export async function runModule(store, module, changed, sourceId = "") {
       if (calculations.issues.length) throw new Error([...new Set(calculations.issues.map(issue => issue.message))].join(" "));
     }
     if (sourceId && snapshot.calculatedMetrics?.length) attempt.gaps.push("本次只核对该能力原始数据，未验证模块计算指标。");
+    attempt.records = applyModuleRecordOrder(snapshot, attempt.records);
     attempt.status = "success";
     attempt.gaps = [...new Set(attempt.gaps)];
     attempt.evidence.forEach((evidence, index) => { evidence.id = `evidence_${index + 1}`; });

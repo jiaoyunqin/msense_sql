@@ -119,11 +119,16 @@ check("Multi trial stores separate overall and breakdown calculations with hidde
   assert(content.experiments[0].datasets[1].records.length > 2);
   assert(content.experiments[0].datasets[1].records.some(row => row.label === "较高消费力"));
 });
-check("Saved report formulas and values survive rendering and independent experiment switching", () => {
+check("Saved trial formulas and values survive matrix rendering without aligning unpublished calculations", () => {
   const before = JSON.stringify(report), descriptor = reportDescriptor(report), view = {};
+  const savedDatasets = structuredClone(descriptor.moduleContent[0].experiments.map(experiment => experiment.datasets));
   renderMultiReport(descriptor, view);
   moduleView(view, descriptor.moduleContent[0]).experimentId = "DEMO-002";
-  assert(renderMultiReport(descriptor, view).includes("计算公式与输入来源"));
+  const html = renderMultiReport(descriptor, view);
+  assert(!html.includes("data-mm-select"));
+  assert(html.includes("当前模块无可对齐的整体数据"));
+  assert(html.includes("计算结果缺少可验证的执行身份或来源版本"));
+  assert.deepEqual(descriptor.moduleContent[0].experiments.map(experiment => experiment.datasets), savedDatasets);
   assert.equal(JSON.stringify(report), before);
   const hidden = clone(report);
   hidden.results.forEach(result => result.moduleCalculations[multi.id].records.forEach(record =>

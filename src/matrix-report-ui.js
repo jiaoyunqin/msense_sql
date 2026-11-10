@@ -1,12 +1,11 @@
 import { moduleView } from "./multi-report-content.js";
-import { matrixPresentation, matrixView, matrixSelection, findMatrixCell } from "./matrix-report-data.js";
+import { matrixView, matrixSelection, findMatrixCell } from "./matrix-report-data.js";
 
 const esc = value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const attr = ([name, value]) => `[${name}=${JSON.stringify(value)}]`;
 const statuses = { missing: "未提供", "not-applicable": "不适用", failed: "取数失败", unavailable: "数据不可用", unalignable: "无法对齐" };
 const columnLabel = column => column.experimentLabel || column.experimentId;
-export const usesMatrix = (report, module) => report.presentation === matrixPresentation
-  && report.snapshot.analysisType === "multi" && module.analysisType === "multi";
+export const usesMatrix = (report, module) => report.snapshot.analysisType === "multi" && module.analysisType === "multi";
 function numberText(cell, field) {
   if (cell.status !== "value") return "—";
   return cell.value.toLocaleString("zh-CN", { minimumFractionDigits: field.digits, maximumFractionDigits: field.digits,
@@ -115,7 +114,6 @@ export function focusMatrixEvidence(module, state, token) {
     focus: `[data-matrix-cell="${token}"]` };
 }
 export function applyMatrixEvent(event, report, view) {
-  if (report.presentation !== matrixPresentation) return false;
   const target = event.target.closest("[data-matrix-module]");
   if (!target) return false;
   const module = report.moduleContent.find(module => module.id === target.dataset.matrixModule);

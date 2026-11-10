@@ -125,6 +125,7 @@ export function moduleConfiguration(module) {
     analysisType: module.analysisType || "single",
     sources: module.sources.map(({ expanded, ...source }) => source),
     reasoning: module.reasoning, considerations: module.considerations,
+    ...(module.reportOrder ? { reportOrder: module.reportOrder } : {}),
     // Omit empty definitions to preserve legacy configuration/trial hashes exactly.
     ...(module.calculatedMetrics != null && (!Array.isArray(module.calculatedMetrics) || module.calculatedMetrics.length)
       ? { calculatedMetrics: module.calculatedMetrics } : {})
@@ -300,7 +301,14 @@ export function copyModuleSources(module) {
         operand.sourceId = sourceIdMap.get(operand.sourceId);
     }
   }
-  return { sources, calculatedMetrics, sourceIdMap };
+  const reportOrder = module.reportOrder ? structuredClone(module.reportOrder) : null;
+  if (reportOrder) {
+    const remap = id => sourceIdMap.get(id) || id;
+    if (reportOrder.blocks) reportOrder.blocks = reportOrder.blocks.map(remap);
+    for (const kind of ["metrics", "dimensions"]) if (reportOrder[kind])
+      reportOrder[kind] = Object.fromEntries(Object.entries(reportOrder[kind]).map(([id, keys]) => [remap(id), keys]));
+  }
+  return { sources, calculatedMetrics, sourceIdMap, ...(reportOrder ? { reportOrder } : {}) };
 }
 export function moduleIssues(store, module, sources = module.sources, { sourceTrial = false } = {}) {
   const issues = [];

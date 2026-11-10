@@ -7,6 +7,7 @@ import { couponIntervalCapability, couponIntervalModes, couponIntervalMetrics, c
 import { preAAMetrics, createPreAAEvidence, preAADataset, preAASingleSummary } from "./pre-aa-demo.js";
 import { captureMatrixSnapshot, matrixPresentation } from "./matrix-report-data.js";
 import { findExperimentResult, reportExperimentKey, reportExperimentLabel, experimentLabel, selectedCandidateId } from "./experiment-identity.js";
+import { applyModuleDatasetOrder } from "./analysis-module-report-order.js";
 
 const metric = key => comparisonMetrics.find(field => field.key === key);
 const fmt = (value, key) => formatMetric(value, metric(key) || { digits: 2 });
@@ -127,7 +128,7 @@ function summarizeSingle(module, entry, result, datasets, index) {
 }
 function summarizeAcross(module, experiments, index) {
   const successful = experiments.filter(experiment => experiment.status === "success"), fields = moduleMetrics(module, "overall");
-  if (successful.length < 2) return [{ text: "当前模块可用实验不足两个，暂不形成跨实验比较；可切换查看已有实验数据。", scope: moduleScope(index) }];
+  if (successful.length < 2) return [{ text: "当前模块可用实验不足两个，暂不形成跨实验比较；可查看已有实验数据。", scope: moduleScope(index) }];
   const messages = [];
   messages.push(...couponIntervalAcrossSummary(experiments).map(text => ({ text, scope: moduleScope(index) })));
   for (const field of fields.filter(field => ["dac", "roi", "cost"].includes(field.key))) {
@@ -156,8 +157,8 @@ function summarizeAcross(module, experiments, index) {
     `${experimentLabel(experiment)}：${experiment.datasets.filter(dataset => dataset.calculated && !dataset.dimensioned).flatMap(dataset =>
       dataset.records.filter(row => !row.control).map(row => `${row.groupName}（${dataset.fields.map((field, i) =>
         `${field.name} ${row.cells[i].text}`).join("；")}）`)).join("；") || "计算结果见分层明细"}`
-  ).join("。") + "。各实验分别计算，请切换实验核对；未跨实验混算或推断显著性。", scope: moduleScope(index) });
-  if (!messages.length) messages.push({ text: `本模块已保留 ${successful.length} 个实验的数据。请选择实验查看本模块对应的数据集。`, scope: moduleScope(index) });
+  ).join("。") + "。各实验分别计算，请在数据明细中核对；未跨实验混算或推断显著性。", scope: moduleScope(index) });
+  if (!messages.length) messages.push({ text: `本模块已保留 ${successful.length} 个实验的数据，具体结果见本模块数据明细。`, scope: moduleScope(index) });
   return messages;
 }
 export function buildReportModules(report) {
@@ -168,7 +169,8 @@ export function buildReportModules(report) {
       const id = reportExperimentKey(report.snapshot, savedEntry);
       const entry = id === savedEntry.input.id ? savedEntry : { ...savedEntry, reportKey: id };
       const result = findExperimentResult(report.results, entry, report.snapshot) || { status: "failed", error: "未保存该实验的数据" };
-      const datasets = [], gaps = [];
+      let datasets = [];
+      const gaps = [];
       if (result.status === "success") for (const source of sources) {
         if (source.capabilityId === "demo-comparison") {
           for (const mode of source.dimensionKeys.filter(mode => ["overall", "demo-spend"].includes(mode))) {
@@ -202,6 +204,7 @@ export function buildReportModules(report) {
           }
         }
       }
+      datasets = applyModuleDatasetOrder(module.configuration, datasets);
       const status = result.status === "success" && !datasets.length ? "unavailable" : result.status;
       const conclusions = summarizeSingle(module, entry, result, datasets, index);
       if (entry.reportKey) datasets.forEach(dataset => { dataset.experimentId = id; });
@@ -265,7 +268,7 @@ export function demoModuleReport() {
   });
   return { id: "r-multi-modules", createdAt: "2026-11-08T09:00:00+08:00", taskId: "", private: false, status: "success",
     snapshot: { analysisType: "multi", goal: "平台老客提频", templateId: "demo-module-report", templateVersion: 1,
-      template: { name: "老客提频 · 多实验分析报告", description: "逐模块比较独立实验，再核对单个实验的结论与数据。",
+      template: { name: "老客提频 · 多实验分析报告", description: "逐模块查看多实验分析结论与数据明细。",
         sections: modules.map((module, i) => ({ moduleId: module.id, version: 1, title: module.configuration.name, kind: i ? "detail" : "overall" })) },
       modules, experiments, supplement: "" },
     results };

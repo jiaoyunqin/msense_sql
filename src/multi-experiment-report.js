@@ -1,9 +1,11 @@
 import { analysisTypes } from "./multi-experiment-data.js";
 import { buildReportModules, moduleView, moduleScope, singleScope, datasetScope } from "./multi-report-content.js";
 import { normalizeReportStatus } from "./report-filters.js";
-import { matrixPresentation, buildMatrixComparisons, matrixDatasetKey, matrixView, findMatrixCell, matrixEvidenceScope } from "./matrix-report-data.js";
+import { matrixPresentation, captureMatrixSnapshot, buildMatrixComparisons, matrixDatasetKey, matrixView, findMatrixCell, matrixEvidenceScope } from "./matrix-report-data.js";
 import { usesMatrix, matrixHTML, applyMatrixEvent, focusMatrixEvidence } from "./matrix-report-ui.js";
 import { experimentLabel, reportExperimentKey, reportExperimentLabel, repeatedLibraId, selectedCandidateId, findExperimentResult } from "./experiment-identity.js";
+import { buildMultiReportSummary } from "./multi-report-summary.js";
+import { renderReportSummary, reportSummaryText } from "./report-summary.js";
 
 const esc = value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const icon = name => ({ chart: '<path d="M3 3v16h18M7 13l4-5 4 2 5-7"/>', data: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/>',
@@ -12,6 +14,11 @@ const svg = name => `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"
 const ai = scope => `<button type="button" class="ask-btn mm-ai" data-ask="${scope}">${svg("chart")} AI</button>`;
 const singleExperimentModule = (report, module) => report.snapshot.analysisType === "multi" && module.analysisType === "single";
 const singleConclusionScope = module => `${module.id}-single-conclusion`;
+function reportModules(report) {
+  return (report.moduleContent || buildReportModules(report)).map(module =>
+    usesMatrix(report, module) && !module.comparison
+      ? { ...module, comparison: buildMatrixComparisons(report, module) } : module);
+}
 function moduleNavigation(report, module) {
   const root = { id: module.id, no: "", title: module.title,
     short: module.analysisType === "multi" ? "多实验分析结论" : "单实验分析结论" };
@@ -33,13 +40,14 @@ function moduleNavigation(report, module) {
   ];
 }
 export function reportDescriptor(saved) {
-  const modules = buildReportModules(saved), success = saved.results.filter(result => result.status === "success").length;
-  if (saved.presentation === matrixPresentation) for (const module of modules) {
-    if (usesMatrix(saved, module)) module.comparison = buildMatrixComparisons(saved, module);
-  }
-  return { ...saved, custom: true, moduleReport: true, presentation: saved.presentation === matrixPresentation ? matrixPresentation : "modules", moduleContent: modules,
+  const projected = saved.snapshot.analysisType === "multi" && saved.matrixSnapshot == null
+    ? { ...saved, matrixSnapshot: captureMatrixSnapshot(saved) } : saved;
+  const modules = reportModules(projected), success = saved.results.filter(result => result.status === "success").length;
+  return { ...projected, custom: true, moduleReport: true,
+    presentation: modules.some(module => usesMatrix(saved, module)) ? matrixPresentation : "modules", moduleContent: modules,
     kind: saved.private ? "模块试跑" : saved.snapshot.analysisType === "multi" ? "多实验报告" : "实验报告",
     title: saved.snapshot.template.name,
+    summary: saved.snapshot.analysisType === "multi" ? buildMultiReportSummary(saved, modules) : saved.summary,
     meta: [["业务目标", saved.snapshot.goal], ["分析类型", analysisTypes[saved.snapshot.analysisType]],
       ["实验范围", `${success}/${saved.results.length} 个${saved.snapshot.experiments.some(entry => repeatedLibraId(saved.snapshot, entry.input.id)) ? "实验分析项" : "实验"}成功`],
       [saved.snapshot.origin === "modules" ? "模块版本" : "模板版本", saved.private ? "模块草稿快照"
@@ -47,7 +55,6 @@ export function reportDescriptor(saved) {
         : `v${saved.snapshot.templateVersion}`]],
     sections: modules.map(module => ({ group: true, no: String(module.index + 1).padStart(2, "0"), title: module.title,
       children: module.comparison ? [moduleNavigation(saved, module)[0],
-        { id: singleConclusionScope(module), no: "", title: "单实验分析结论", short: "单实验分析结论" },
         ...module.experiments.map(experiment => ({
           id: singleScope(module.index, experiment.id), no: "", title: `${experiment.name} · ${experimentLabel(experiment)}`,
           short: `${experiment.name} · ${experimentLabel(experiment)}`, hiddenToc: true
@@ -69,14 +76,6 @@ export function reportListRow(report) {
 function conclusionHTML(title, messages, scope) {
   return `<div class="ccard mm-conclusion" data-card="${scope}"><div class="ccard-h"><span class="t">${svg("chart")}${title}</span><span class="grow"></span>${ai(scope)}</div>
     ${messages.length ? `<ul>${messages.map(message => `<li>${esc(message.text)}</li>`).join("")}</ul>` : '<p class="mm-muted">当前没有可用分析结论。</p>'}</div>`;
-}
-function matrixSingleConclusionHTML(module, experiment) {
-  const scope = singleScope(module.index, experiment.id);
-  const messages = experiment.status === "success" ? experiment.conclusions
-    : [{ text: `该实验暂未生成分析结论：${experiment.error || "数据不可用"}。` }];
-  return `<section class="mx-single-conclusion" id="sec-${scope}" data-sec="${scope}" data-conclusion-experiment="${esc(experiment.id)}">
-    <div class="mx-single-label"><strong>${esc(experiment.name)}</strong><span>${esc(experimentLabel(experiment))}</span></div>
-    ${conclusionHTML("单实验分析结论", messages, scope)}</section>`;
 }
 function cellHTML(cell) {
   const title = cell.reason || (cell.raw != null ? `原值：${cell.raw}${cell.control != null ? `；自身对照组：${cell.control}` : ""}` : cell.text);
@@ -105,12 +104,13 @@ function datasetHTML(module, experiment, dataset, datasetIndex, view, scopedToEx
 }
 function experimentHTML(report, module, experiment, state, scopedToExperiment = false) {
   const singleId = singleScope(module.index, experiment.id);
+  const showConclusion = module.analysisType === "single";
   return `<div class="mm-experiment-content" id="sec-${singleId}" data-sec="${singleId}" data-selected-experiment="${experiment.id}">
     <div class="mm-experiment-meta"><span>${esc(experimentLabel(experiment))}</span><span>观察窗口 ${experiment.input.start} 至 ${experiment.input.end}</span><span>对照组：${esc(experiment.definition.control.name)}</span></div>
-    ${experiment.status === "success" ? `${conclusionHTML("单实验分析结论", experiment.conclusions, singleId)}
+    ${experiment.status === "success" ? `${showConclusion ? conclusionHTML("单实验分析结论", experiment.conclusions, singleId) : ""}
       <div class="mm-data-heading">${svg("data")}<strong>数据明细</strong><span>${experiment.datasets.length} 个数据集</span></div>
       ${experiment.datasets.map((dataset, datasetIndex) => datasetHTML(module, experiment, dataset, datasetIndex, state, scopedToExperiment)).join("")}`
-      : `<div class="mm-unavailable" role="status"><strong>该实验暂不可查看</strong><p>${esc(experiment.error || "分析尚未完成")}</p>${experiment.gaps.map(gap => `<p>${esc(gap)}</p>`).join("")}<p>可切换查看其他实验的数据与结论。</p>${report.taskId ? `<a href="#/experiments/task/${report.taskId}">返回任务处理</a>` : ""}</div>`}
+      : `<div class="mm-unavailable" role="status"><strong>该实验暂不可查看</strong><p>${esc(experiment.error || "分析尚未完成")}</p>${experiment.gaps.map(gap => `<p>${esc(gap)}</p>`).join("")}<p>可切换查看其他实验的${showConclusion ? "数据与结论" : "数据"}。</p>${report.taskId ? `<a href="#/experiments/task/${report.taskId}">返回任务处理</a>` : ""}</div>`}
     </div>`;
 }
 function experimentSelectorHTML(module, experiment) {
@@ -133,8 +133,9 @@ function reportExperimentHeader(report) {
   }).join("")}</div>`;
 }
 export function renderMultiReport(report, view) {
-  const modules = report.moduleContent || buildReportModules(report), failed = report.results.filter(result => result.status !== "success");
+  const modules = reportModules(report), failed = report.results.filter(result => result.status !== "success");
   const multi = report.snapshot.analysisType === "multi";
+  const summary = report.summary || (multi ? buildMultiReportSummary(report, modules) : null);
   return `<header class="rhead mm-report-header"><p class="eyebrow">实验分析报告 <span class="ma-demo-tag">分析类型：${esc(analysisTypes[report.snapshot.analysisType])}</span></p><h1>${esc(report.title)}</h1>
     ${multi ? `<div class="mm-report-context">${report.meta.filter(([label]) => label !== "分析类型").map(([label, value]) => `<span>${esc(label)}：${esc(value)}</span>`).join("")}</div>`
       : `<dl class="meta">${report.meta.map(([label, value]) => `<div><dt>${label}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl>`}
@@ -145,6 +146,7 @@ export function renderMultiReport(report, view) {
       return esc(`${entry ? reportExperimentLabel(report.snapshot, entry) : result.id} ${result.error || "数据未完成"}`);
     }).join("；")}${report.taskId ? ` <a href="#/experiments/task/${report.taskId}">返回任务</a>` : ""}</div>` : ""}
     ${report.snapshot.supplement ? `<details class="mm-supplement"><summary>用户补充信息</summary><p>${esc(report.snapshot.supplement)}</p></details>` : ""}</header>
+    ${renderReportSummary(summary)}
     ${modules.map(module => {
       const state = moduleView(view, module), experiment = module.experiments.find(experiment => experiment.id === state.experimentId) || module.experiments[0];
       const cross = report.snapshot.analysisType === "multi" && module.analysisType === "multi";
@@ -154,15 +156,12 @@ export function renderMultiReport(report, view) {
       return `<section class="sec mm-module" id="sec-${module.id}" data-sec="${module.id}" data-mm-section="${module.id}" data-module-analysis-type="${module.analysisType}">
         <header class="mm-module-heading"><h2>${esc(module.title)}</h2><p>${esc(module.description)}</p></header>
         ${cross ? conclusionHTML("多实验分析结论", module.conclusions, module.id) : ""}
-        ${matrix ? `<div class="sec" id="sec-${singleConclusionScope(module)}" data-sec="${singleConclusionScope(module)}">
-          ${experimentSelectorHTML(module, experiment)}
-          ${matrixSingleConclusionHTML(module, experiment)}</div>
-          <div class="mm-data-heading">${svg("data")}<strong>数据明细</strong></div>
+        ${matrix ? `<div class="mm-data-heading">${svg("data")}<strong>数据明细</strong></div>
           ${matrixHTML(module, state)}` : detail()}</section>`;
     }).join("")}`;
 }
 function scopeContext(report, scope, view) {
-  const modules = report.moduleContent || buildReportModules(report);
+  const modules = reportModules(report);
   const module = modules.find(module => scope === module.id || scope?.startsWith(`${module.id}-`));
   if (!module) return { modules };
   if (usesMatrix(report, module) && scope?.startsWith(`${module.id}-matrix-cell-`)) {
@@ -177,15 +176,24 @@ function scopeContext(report, scope, view) {
   return { modules: [module], module, experiment: exact || selected };
 }
 export function multiSuggestions(report, scope) {
-  if (report.presentation === matrixPresentation && !scope?.includes("-exp-"))
+  if (scope === "all" || scope === report.summary?.id)
+    return ["总结这份报告的核心结论", "哪些实验效果明确，哪些还需要继续观察？", "核对整份报告的数据缺失与分析限制"];
+  const { module } = scopeContext(report, scope);
+  if (module && usesMatrix(report, module) && !scope?.includes("-exp-"))
     return ["总结本模块各实验的表现差异", "哪些差异需要结合观察期和人群解释？", "核对表格中的指标口径与缺失项"];
   if (scope?.includes("-exp-") || scope?.includes("-data-")) return ["总结这个实验在本模块的表现", "这些指标如何计算，缺失值是什么原因？"];
-  if (report.moduleContent?.find(module => module.id === scope)?.analysisType === "single")
+  if (module?.analysisType === "single")
     return ["逐个总结本模块各实验的结论", "核对各实验的数据来源与缺失项"];
   return ["总结本模块各实验的表现差异", "哪些差异需要结合观察期和人群解释？", "切换实验后应重点核对哪些数据？"];
 }
 export function multiAnswer(report, question, scope = "all", view = {}) {
   const context = scopeContext(report, scope, view), lines = [];
+  if (report.summary && (scope === "all" || scope === report.summary.id)) {
+    lines.push(`**${report.summary.title}**`, reportSummaryText(report.summary),
+      `[[cite:${report.summary.id}::查看实验核心结论]]`);
+    if (scope === report.summary.id) return { steps: ["读取报告固定快照", "汇总整份报告的核心结论"],
+      md: `本地模拟回答 · 证据范围：整份报告的实验核心结论。\n\n${lines.join("\n\n")}`, follow: multiSuggestions(report, scope) };
+  }
   if (context.evidence) {
     const { dataset, column, cell } = context.evidence, field = dataset.fields.find(field => field.key === cell.evidence.metricKey);
     return { steps: ["读取固定单元格证据", "核对实验、数据集、组别与指标"],
@@ -202,7 +210,7 @@ export function multiAnswer(report, question, scope = "all", view = {}) {
     for (const experiment of experiments) {
       if (context.experiment || module.analysisType === "single" || /核对|计算|缺失/.test(question)) {
         lines.push(`${experiment.name}（${experimentLabel(experiment)}）：`, ...(experiment.conclusions.length ? experiment.conclusions.map(conclusion => conclusion.text) : [experiment.error || "未提供分析结论"]),
-          `[[cite:${singleScope(module.index, experiment.id)}::${usesMatrix(report, module) ? "查看该实验分析结论" : "查看该实验结论与数据"}]]`);
+          `[[cite:${singleScope(module.index, experiment.id)}::${module.analysisType === "multi" ? "查看该实验数据" : "查看该实验结论与数据"}]]`);
       }
     }
     if (/计算|缺失/.test(question)) {
@@ -218,20 +226,21 @@ export function multiAnswer(report, question, scope = "all", view = {}) {
   return { steps: ["读取固定模块快照", "核对当前实验与数据来源"], md: `本地模拟回答 · 证据范围：${evidence}。\n\n${lines.join("\n\n")}`, follow: multiSuggestions(report, scope) };
 }
 export function applyModuleReportEvent(event, report, view) {
-  const matrixChange = applyMatrixEvent(event, report, view);
+  const modules = reportModules(report);
+  const matrixChange = applyMatrixEvent(event, { ...report, moduleContent: modules }, view);
   if (matrixChange) return matrixChange;
   const target = event.target.closest("[data-mm-select],[data-mm-group],[data-mm-transpose]");
   if (!target) return false;
   if (target.dataset.mmSelect) {
     if (event.type !== "change") return false;
-    const module = report.moduleContent.find(module => module.id === target.dataset.mmSelect);
-    if (!module?.experiments.some(experiment => experiment.id === target.value)) return false;
+    const module = modules.find(module => module.id === target.dataset.mmSelect);
+    if (!module?.experiments.some(experiment => experiment.id === target.value) || usesMatrix(report, module)) return false;
     const state = moduleView(view, module);
     state.experimentId = target.value;
     return { moduleId: module.id, focus: `[data-mm-select="${module.id}"]` };
   }
   if (event.type !== "click") return false;
-  const module = report.moduleContent.find(module => module.id === target.dataset.mmModule), state = module && moduleView(view, module);
+  const module = modules.find(module => module.id === target.dataset.mmModule), state = module && moduleView(view, module);
   if (!state || usesMatrix(report, module)) return false;
   const experimentId = target.dataset.mmExperiment || state.experimentId;
   const experiment = module.experiments.find(experiment => experiment.id === experimentId);
@@ -243,26 +252,23 @@ export function applyModuleReportEvent(event, report, view) {
   return { moduleId: module.id, focus: `${control}[data-mm-module="${module.id}"][data-mm-table="${target.dataset.mmTable}"]${target.dataset.mmExperiment ? `[data-mm-experiment="${experimentId}"]` : ""}` };
 }
 export function prepareModuleCitation(report, scope, view) {
-  const modules = report.moduleContent;
-  if (!modules) return false;
+  if (report.summary?.id === scope) return { scope };
+  const modules = reportModules(report);
   // Keep legacy follow-up references useful without changing old messages.
   const legacy = { "ma-overall": modules[0]?.id, "ma-strategy": modules.find(module => module.experiments.some(experiment => experiment.datasets.some(dataset => dataset.mode === "strategy")))?.id,
     "ma-detail": modules[0]?.id, "ma-boundary": modules[0]?.id };
-  const resolved = legacy[scope] || scope;
+  let resolved = legacy[scope] || scope;
   const module = modules.find(module => resolved === module.id || resolved?.startsWith(`${module.id}-`));
   if (!module) return false;
+  if (resolved === singleConclusionScope(module)) resolved = module.id;
   if (usesMatrix(report, module)) {
     const state = moduleView(view, module);
     const { matrix } = matrixView(state, module.comparison);
     const prefix = `${module.id}-matrix-cell-`;
     if (resolved.startsWith(prefix)) return focusMatrixEvidence(module, state, resolved.slice(prefix.length));
-    if (resolved === module.id || resolved === singleConclusionScope(module)) return { scope: resolved, moduleId: module.id };
+    if (resolved === module.id) return { scope: resolved, moduleId: module.id };
     const experiment = module.experiments.find(experiment => resolved === singleScope(module.index, experiment.id)
       || resolved.startsWith(`${singleScope(module.index, experiment.id)}-data-`));
-    if (experiment && resolved === singleScope(module.index, experiment.id)) {
-      state.experimentId = experiment.id;
-      return { scope: resolved, moduleId: module.id };
-    }
     const matrixIndex = resolved.startsWith(`${module.id}-matrix-data-`)
       ? Number(resolved.slice(`${module.id}-matrix-data-`.length)) : -1;
     let dataset = module.comparison.datasets[matrixIndex];

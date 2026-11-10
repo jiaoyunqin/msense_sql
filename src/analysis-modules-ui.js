@@ -6,6 +6,8 @@ import {
   calculatedMetricIssues, includeCalculationDependency, newCalculatedMetric, metricReferenceKey, copyModuleSources
 } from "./analysis-module-data.js";
 import { runModule } from "./analysis-module-runner.js";
+import { sourceMetricGrains, commonCalculationGrains } from "./analysis-module-calculations.js";
+import { calculationBlockId, reportBlockIds, orderReportMetrics, orderReportDimensions, moveOrderedKey, pruneModuleReportOrder } from "./analysis-module-report-order.js";
 import "./analysis-modules.css";
 // Share the online catalog presentation with the report template list.
 import "./report-template-catalog.css";
@@ -28,6 +30,10 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
   initializeModules(store);
   let search = "", creator = "", state = "all", type = "all", sort = "updated", errors = [], running = false;
   let page = 1, pageSize = 20;
+  const configurationTabs = new Map();
+  let draggedOrder = null;
+  const orderAttrs = (kind, block, key) => `data-order-kind="${kind}" data-order-block="${esc(block)}" data-order-key="${esc(key)}"`;
+  const orderGrip = (kind, block, key, name) => `<button type="button" class="am-order-grip" draggable="true" ${orderAttrs(kind, block, key)} aria-label="调整${esc(name)}顺序" title="拖拽排序，或用方向键调整">${icon("grip-vertical")}</button>`;
   const creatorOf = module => String(module.createdBy || "").trim();
   const creatorLabel = module => module.createdByName || (creatorOf(module) === currentActor ? "秦娇芸" : creatorOf(module)) || "—";
   const listSelect = (model, label, entries, value) => `<label class="ma-template-select"><select data-model="mod-${model}" aria-label="${label}">${entries.map(([key, name]) => `<option value="${key}" ${key === value ? "selected" : ""}>${name}</option>`).join("")}</select>${icon("chevron-down")}</label>`;
@@ -126,11 +132,15 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
     const candidates = calculationCandidates(store, module);
     return `<section class="am-calculations" aria-label="计算指标">
       <header><strong>计算指标 <span>（可选）</span></strong>${button("calc-add", "添加计算指标", "plus", candidates.length ? "" : 'disabled title="当前取数能力暂无可计算指标"')}</header>
-      ${metrics.length ? `<div class="am-calc-head"><span>指标名称</span><span>计算类型</span><span>表达式</span><span>操作</span></div><div class="am-calc-rows">${metrics.map(metric => `<div class="am-calc-row" data-calculation-key="${metric.key}">
+      ${metrics.length ? `<div class="am-calc-head"><span></span><span>指标名称</span><span>计算类型</span><span>表达式</span><span>操作</span></div><div class="am-calc-rows">${metrics.map((metric, index) => `<div class="am-calc-row" data-calculation-key="${metric.key}" ${orderAttrs("metrics", calculationBlockId, metric.key)}>
+        ${orderGrip("metrics", calculationBlockId, metric.key, metric.name || "计算指标")}
         <div class="am-calc-cell"><span class="am-calc-mobile-label">指标名称</span><input data-model="mod-calc.name" data-key="${metric.key}" aria-label="计算指标名称" value="${esc(metric.name)}" placeholder="输入指标名称"></div>
         <div class="am-calc-cell"><span class="am-calc-mobile-label">计算类型</span><select data-model="mod-calc.operator" data-key="${metric.key}" aria-label="计算类型">${calculationTypes.map(([value, label]) => `<option value="${value}" ${metric.formula.operator === value ? "selected" : ""}>${label}</option>`).join("")}</select></div>
         <div class="am-calc-cell"><span class="am-calc-mobile-label">表达式</span><div class="am-calc-expression">${calculationPicker(metric, "left", candidates)}<span class="am-calc-sign">${operatorLabel(metric.formula.operator)}</span>${calculationPicker(metric, "right", candidates)}</div></div>
-        <div class="am-calc-row-actions"><details class="am-multi-select am-calc-more"><summary aria-label="${esc(metric.name || "计算指标")}更多设置" title="更多设置">${icon("ellipsis")}</summary><div class="am-picker-menu">
+        <div class="am-calc-row-actions">
+          ${button("order-move", "", "arrow-up", `${orderAttrs("metrics", calculationBlockId, metric.key)} data-direction="-1" aria-label="上移${esc(metric.name || "计算指标")}" ${index === 0 ? "disabled" : ""}`)}
+          ${button("order-move", "", "arrow-down", `${orderAttrs("metrics", calculationBlockId, metric.key)} data-direction="1" aria-label="下移${esc(metric.name || "计算指标")}" ${index === metrics.length - 1 ? "disabled" : ""}`)}
+          <details class="am-multi-select am-calc-more"><summary aria-label="${esc(metric.name || "计算指标")}更多设置" title="更多设置">${icon("ellipsis")}</summary><div class="am-picker-menu">
           <label class="am-field"><span>显示格式</span><select data-model="mod-calc.format" data-key="${metric.key}" aria-label="计算指标显示格式"><option value="number" ${metric.format === "number" ? "selected" : ""}>数值</option><option value="percent" ${metric.format === "percent" ? "selected" : ""}>百分比</option></select></label>
           <label class="am-field"><span>小数位</span><select data-model="mod-calc.precision" data-key="${metric.key}" aria-label="计算指标小数位">${Array.from({ length: 7 }, (_, precision) => `<option value="${precision}" ${metric.precision === precision ? "selected" : ""}>${precision} 位</option>`).join("")}</select></label>
           <label class="am-report-check"><input type="checkbox" data-model="mod-calc.report" data-key="${metric.key}" ${metric.showInReport ? "checked" : ""}>报告中展示</label></div></details>
@@ -141,7 +151,7 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
   function refreshCalculations() {
     const container = outlet.querySelector(".am-calculations-wrap");
     if (!container) return;
-    container.innerHTML = calculationsHTML(); refreshCalculationIssues(); createIcons({ icons });
+    container.innerHTML = calculationsHTML(); refreshReportOrder(); refreshConfigurationVisibility(); refreshCalculationIssues(); createIcons({ icons });
   }
   function refreshCalculationIssues() {
     const issues = calculatedMetricIssues(store, store.analysis);
@@ -162,15 +172,96 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       ${options().map((option) => `<label class="am-picker-option" data-option-name="${esc(option.name)}"><input type="checkbox" data-model="mod-source-choice" value="${option.key}" ${chosen.some((entry) => entry.key === option.key) ? "checked" : ""}><span>${esc(option.name)}</span></label>`).join("")}
       </div></div></details>${module.sources.length ? button("clear-sources", "", "x", 'aria-label="清空取数模块" title="清空"') : ""}</div>`;
   }
+  function orderChips(kind, blockId, fields) {
+    return fields.length ? fields.map(field => `<button type="button" class="am-chip am-order-chip" draggable="true" ${orderAttrs(kind, blockId, field.key)}
+      title="拖拽排序，或用方向键调整"${field.showInReport === false ? ' data-report-hidden="true"' : ""}>${icon("grip-vertical")}<span>${esc(field.name || "未命名计算指标")}</span>${field.showInReport === false ? '<small>不展示</small>' : ""}</button>`).join("") : `<small>暂未选择${kind === "metrics" ? "指标" : "维度"}</small>`;
+  }
   function sourceSummary(source) {
     const definition = sourceDefinition(store, source);
     if (!definition) return "<p>固定版本已不可用，请移除后重新选择。</p>";
-    const metrics = definition.metrics.filter((field) => source.metricKeys.includes(field.key));
-    const dimensions = definition.dimensions.filter((field) => source.dimensionKeys.includes(field.key));
-    return `<div><span>指标</span><div>${metrics.length ? metrics.map((field) => `<span class="am-chip">${esc(field.name)}</span>`).join("")
-      : "<small>暂未选择指标</small>"}</div></div>${definition.dimensions.length ? `<div><span>维度</span><div>${dimensions.length ? dimensions.map((field) => `<span class="am-chip">${esc(field.name)}</span>`).join("") : "<small>暂未选择维度</small>"}</div></div>` : ""}`;
+    const metrics = orderReportMetrics(store.analysis, source.id, definition.metrics.filter(field => source.metricKeys.includes(field.key)));
+    const dimensions = orderReportDimensions(store.analysis, source.id, definition.dimensions.filter(field => source.dimensionKeys.includes(field.key)));
+    return `<div><span>指标</span><div>${orderChips("metrics", source.id, metrics)}</div></div>${definition.dimensions.length ? `<div><span>维度</span><div>${orderChips("dimensions", source.id, dimensions)}</div></div>` : ""}`;
   }
-  function sourceCard(source, index) {
+  function calculationDimensionNames() {
+    const module = store.analysis;
+    const grainsFor = ref => {
+      if (!ref || ref.type !== "metric") return [];
+      const source = module.sources.find(source => source.id === ref.sourceId);
+      return source && source.metricKeys.includes(ref.key) ? sourceMetricGrains(source, sourceDefinition(store, source), ref.key) : [];
+    };
+    return [...new Set((module.calculatedMetrics || []).flatMap(metric =>
+      commonCalculationGrains(grainsFor(metric.formula?.left),
+        metric.formula?.right?.type === "constant" ? null : grainsFor(metric.formula?.right)).map(({ left }) => {
+        const source = module.sources.find(source => source.id === left.sourceId);
+        return sourceDefinition(store, source)?.dimensions.find(dimension => dimension.key === left.modeId)?.name || "整体";
+      })))];
+  }
+  function reportOrderHTML() {
+    const module = store.analysis, blocks = reportBlockIds(module);
+    if (!blocks.length) return "";
+    return `<section class="am-report-order" aria-label="指标与维度及报告顺序">
+      <header><strong>指标 × 维度</strong><span>拖拽调整报告展示顺序</span></header>
+      <div class="am-order-blocks">${blocks.map((blockId, index) => {
+        const source = module.sources.find(source => source.id === blockId);
+        const name = source ? sourceDefinition(store, source)?.name || "固定版本已不可用" : "计算指标";
+        return `<article class="am-order-block" ${orderAttrs("blocks", blockId, blockId)}>
+          <header>${orderGrip("blocks", blockId, blockId, name)}<strong>${esc(name)}</strong>${source?.showInReport === false ? '<span class="am-order-hidden">不在报告中展示</span>' : ""}
+            <div class="am-order-block-actions">${button("order-move", "", "arrow-up", `${orderAttrs("blocks", blockId, blockId)} data-direction="-1" aria-label="上移${esc(name)}" ${index === 0 ? "disabled" : ""}`)}${button("order-move", "", "arrow-down", `${orderAttrs("blocks", blockId, blockId)} data-direction="1" aria-label="下移${esc(name)}" ${index === blocks.length - 1 ? "disabled" : ""}`)}</div></header>
+          <div class="am-selection-summary">${source ? sourceSummary(source) : `<div><span>指标</span><div>${orderChips("metrics", calculationBlockId, module.calculatedMetrics)}</div></div><div><span>维度</span><div>${calculationDimensionNames().map(name => `<span class="am-chip">${esc(name)}</span>`).join("") || "<small>配置表达式后显示</small>"}</div></div>`}</div>
+        </article>`;
+      }).join("")}</div><p class="am-order-status" aria-live="polite"></p></section>`;
+  }
+  function refreshReportOrder() {
+    const container = outlet.querySelector(".am-report-order-wrap");
+    if (container) { container.innerHTML = reportOrderHTML(); createIcons({ icons }); }
+  }
+  function metricConfigurationHTML() {
+    const module = store.analysis, active = configurationTabs.get(module.id) || "existing";
+    return `<section class="am-metric-configuration" aria-label="指标配置"${!module.sources.length && !module.calculatedMetrics?.length ? " hidden" : ""}>
+      <header><strong>指标配置</strong><div class="am-configuration-tabs" role="tablist" aria-label="指标配置方式">
+        ${[["existing", "已有指标"], ["calculated", "计算指标"]].map(([key, label]) => `<button type="button" role="tab" id="am-tab-${key}" data-action="mod-configuration-tab" data-tab="${key}" aria-controls="am-panel-${key}" aria-selected="${active === key}" tabindex="${active === key ? 0 : -1}">${label}</button>`).join("")}</div></header>
+      <div class="am-sources" id="am-panel-existing" role="tabpanel" aria-labelledby="am-tab-existing"${active !== "existing" ? " hidden" : ""}>${module.sources.map(sourceCard).join("") || '<p class="am-calc-hint">先选择取数模块，再选择指标和维度。</p>'}</div>
+      <div class="am-calculations-wrap" id="am-panel-calculated" role="tabpanel" aria-labelledby="am-tab-calculated"${active !== "calculated" ? " hidden" : ""}>${calculationsHTML()}</div></section>`;
+  }
+  function refreshConfigurationVisibility() {
+    const module = store.analysis, area = outlet.querySelector(".am-metric-configuration");
+    if (!area) return;
+    area.hidden = !module.sources.length && !module.calculatedMetrics?.length;
+    const active = configurationTabs.get(module.id) || "existing";
+    area.querySelectorAll('[role="tab"]').forEach(tab => {
+      tab.setAttribute("aria-selected", String(tab.dataset.tab === active));
+      tab.tabIndex = tab.dataset.tab === active ? 0 : -1;
+    });
+    outlet.querySelector(".am-sources").hidden = active !== "existing";
+    outlet.querySelector(".am-calculations-wrap").hidden = active !== "calculated";
+  }
+  function orderKeys(kind, blockId) {
+    const module = store.analysis;
+    if (kind === "blocks") return reportBlockIds(module);
+    if (blockId === calculationBlockId) return module.calculatedMetrics.map(metric => metric.key);
+    const source = module.sources.find(source => source.id === blockId), definition = source && sourceDefinition(store, source);
+    if (!definition) return [];
+    return (kind === "metrics" ? orderReportMetrics(module, blockId, definition.metrics.filter(field => source.metricKeys.includes(field.key)))
+      : orderReportDimensions(module, blockId, definition.dimensions.filter(field => source.dimensionKeys.includes(field.key)))).map(field => field.key);
+  }
+  function reorder(kind, blockId, key, target, focusSelector = "") {
+    const module = store.analysis, next = moveOrderedKey(orderKeys(kind, blockId), key, target);
+    if (!next) return;
+    if (kind === "metrics" && blockId === calculationBlockId) {
+      module.calculatedMetrics = next.map(key => module.calculatedMetrics.find(metric => metric.key === key));
+      touch(); refreshCalculations();
+    } else {
+      module.reportOrder ||= {};
+      if (kind === "blocks") module.reportOrder.blocks = next;
+      else { module.reportOrder[kind] ||= {}; module.reportOrder[kind][blockId] = next; }
+      touch(); refreshReportOrder(); refreshActions();
+    }
+    const status = outlet.querySelector(".am-order-status");
+    if (status) status.textContent = "报告展示顺序已更新";
+    if (focusSelector) outlet.querySelector(focusSelector)?.focus({ preventScroll: true });
+  }
+  function sourceCard(source) {
     const module = store.analysis, definition = sourceDefinition(store, source);
     if (!definition) return `<article class="am-source-card" data-source-id="${source.id}"><header><strong>固定版本已不可用</strong>${button("remove-source", "移除", "trash-2", `data-id="${source.id}"`)}</header></article>`;
     const list = (kind, fields, selected) => `<section class="am-choice-column ${kind}"><header><div><strong>${kind === "metric" ? "指标" : "下钻维度"}</strong><span class="am-choice-count">已选 ${selected.length}/${fields.length}</span></div>
@@ -180,13 +271,11 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
     return `<article class="am-source-card ${source.expanded ? "expanded" : ""}" data-source-id="${source.id}">
       <header><button type="button" class="am-source-title" data-action="mod-expand" data-id="${source.id}" aria-expanded="${source.expanded}"><strong>${esc(definition.name)}</strong><span class="am-selected-count">已选 ${source.metricKeys.length} 个指标${definition.dimensions.length ? ` · ${source.dimensionKeys.length} 个维度` : ""}</span>${source.kind === "sql" ? `<span class="am-version-tag">v${source.version}</span>` : ""}</button>
       <div class="am-source-actions"><label class="am-report-check"><input type="checkbox" data-model="mod-report" data-source-id="${source.id}" ${source.showInReport ? "checked" : ""}>报告中展示</label>
-      ${button("move", "", "arrow-up", `data-id="${source.id}" data-direction="-1" aria-label="上移${esc(definition.name)}" ${index === 0 ? "disabled" : ""}`)}
-      ${button("move", "", "arrow-down", `data-id="${source.id}" data-direction="1" aria-label="下移${esc(definition.name)}" ${index === module.sources.length - 1 ? "disabled" : ""}`)}
       ${module.analysisType !== "multi" ? button("trial-source", "试跑取数", "flask-conical", `data-id="${source.id}" ${running || moduleIssues(store, { ...module, name: module.name || "新模块" }, [source], { sourceTrial: true }).length ? "disabled" : ""}`) : ""}
       ${button("expand", source.expanded ? "收起" : "展开", source.expanded ? "chevron-up" : "chevron-down", `data-id="${source.id}" aria-expanded="${source.expanded}" aria-controls="source-content-${source.id}"`)}
       ${button("remove-source", "移除", "trash-2", `data-id="${source.id}"`)}</div></header>
       <div class="am-source-content" id="source-content-${source.id}" ${source.expanded ? "" : "hidden"}>
-        <p class="am-source-description">${esc(definition.description)}</p><div class="am-selection-summary">${sourceSummary(source)}</div>
+        <p class="am-source-description">${esc(definition.description)}</p>
         <div class="am-selection-columns">${list("metric", definition.metrics, source.metricKeys)}${list("dimension", definition.dimensions, source.dimensionKeys)}</div>
       </div></article>`;
   }
@@ -207,8 +296,8 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
         <div class="am-field"><span>业务目标</span><div class="am-goal">${businessGoal}${icon("chevron-down")}</div></div>
         <label class="am-field"><span>适用端（可选）</span><select data-model="mod-apps"><option value="" ${!module.apps.length ? "selected" : ""}>不选择表示不限端</option><option value="抖音" ${module.apps.join(",") === "抖音" ? "selected" : ""}>抖音</option><option value="极速版" ${module.apps.join(",") === "极速版" ? "selected" : ""}>极速版</option><option value="抖音,极速版" ${module.apps.length > 1 ? "selected" : ""}>抖音、极速版</option></select></label>
         <label class="am-field"><span>分析类型</span><select data-model="mod-field.analysisType"><option value="single" ${module.analysisType === "single" ? "selected" : ""}>单实验分析</option><option value="multi" ${module.analysisType === "multi" ? "selected" : ""}>多实验分析</option></select></label></div>
-        <div class="am-picker-wrap">${renderPicker()}</div><div class="am-sources">${module.sources.map(sourceCard).join("")}</div>
-        <div class="am-calculations-wrap">${calculationsHTML()}</div>
+        <div class="am-picker-wrap">${renderPicker()}</div><div class="am-report-order-wrap">${reportOrderHTML()}</div>
+        ${metricConfigurationHTML()}
         ${area("分析思路（可选）", "reasoning", module.reasoning, "如需结论，请说明分析顺序、判断方法和归因证据的组织方式")}
         ${area("注意事项（可选）", "considerations", module.considerations, "补充分析边界、数据口径及需要关注的问题")}
         ${module.attempts.length ? `<details class="am-trial-history"><summary>试跑记录 <span>${module.attempts.length}</span></summary><div>${module.attempts.map((attempt) => `<a href="#/analysis/${attempt.id}"><span>${attempt.sourceTrial ? "取数试跑" : "分析试跑"} · ${attempt.status === "success" ? "成功" : attempt.status === "running" ? "运行中" : "失败"}</span><small>${esc(time(attempt.startedAt))}</small>${icon("arrow-up-right")}</a>`).join("")}</div></details>` : ""}
@@ -218,7 +307,7 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
     refreshCalculationIssues(); createIcons({ icons });
   }
   function refreshSources() {
-    outlet.querySelector(".am-sources").innerHTML = store.analysis.sources.map(sourceCard).join("");
+    outlet.querySelector(".am-sources").innerHTML = store.analysis.sources.map(sourceCard).join("") || '<p class="am-calc-hint">先选择取数模块，再选择指标和维度。</p>';
     outlet.querySelector(".am-picker-wrap").innerHTML = renderPicker();
     refreshCalculations(); createIcons({ icons }); refreshActions();
   }
@@ -236,8 +325,8 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       : latest ? `v${latest.number} · ${stateNames[moduleState(module)]}` : "草稿";
   }
   function refreshSelection(source) {
-    const card = outlet.querySelector(`[data-source-id="${source.id}"]`), definition = sourceDefinition(store, source);
-    card.querySelector(".am-selection-summary").innerHTML = sourceSummary(source);
+    const card = outlet.querySelector(`.am-source-card[data-source-id="${source.id}"]`), definition = sourceDefinition(store, source);
+    refreshReportOrder();
     card.querySelector(".am-selected-count").textContent = `已选 ${source.metricKeys.length} 个指标${definition.dimensions.length ? ` · ${source.dimensionKeys.length} 个维度` : ""}`;
     for (const [kind, fields, selected] of [["metric", definition.metrics, source.metricKeys], ["dimension", definition.dimensions, source.dimensionKeys]]) {
       const column = card.querySelector(`.am-choice-column.${kind}`);
@@ -251,7 +340,7 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       || moduleIssues(store, { ...store.analysis, name: store.analysis.name || "新模块" }, [source], { sourceTrial: true }).length > 0;
     refreshCalculationIssues();
   }
-  const touch = () => { store.analysis.updatedAt = new Date().toISOString(); persist(); };
+  const touch = () => { pruneModuleReportOrder(store.analysis); store.analysis.updatedAt = new Date().toISOString(); persist(); };
   async function startTrial(sourceId = "") {
     if (running) return;
     running = true;
@@ -293,6 +382,7 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
         updatedAt: new Date().toISOString(), versions: [], attempts: [], multiAttempts: [], enabled: true, archived: false });
       const remapped = copyModuleSources(original);
       copy.sources = remapped.sources; copy.calculatedMetrics = remapped.calculatedMetrics;
+      if (remapped.reportOrder) copy.reportOrder = remapped.reportOrder;
       store.modules.push(copy); store.analysis = copy; persist(); location.hash = `/modules/${copy.id}`; return;
     }
     if (action === "archive") {
@@ -305,6 +395,18 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       persist(); closeDialog(); render(); showToast("模块已归档"); return;
     }
     if (action === "cancel") { closeDialog(); return; }
+    if (action === "configuration-tab") {
+      configurationTabs.set(module.id, trigger.dataset.tab);
+      refreshConfigurationVisibility(); return;
+    }
+    if (action === "order-move") {
+      const { orderKind: kind, orderBlock: blockId, orderKey: key } = trigger.dataset;
+      const keys = orderKeys(kind, blockId), target = keys[keys.indexOf(key) + Number(trigger.dataset.direction)];
+      const selector = kind === "metrics" && blockId === calculationBlockId && trigger.closest(".am-calc-row")
+        ? `.am-calc-row [data-action="mod-order-move"][data-order-key="${CSS.escape(key)}"][data-direction="${trigger.dataset.direction}"]`
+        : `.am-order-grip[data-order-key="${CSS.escape(key)}"]`;
+      reorder(kind, blockId, key, target, selector); return;
+    }
     if (action.startsWith("calc-")) {
       const metric = module.calculatedMetrics.find(metric => metric.key === trigger.dataset.key);
       if (action === "calc-add") {
@@ -368,11 +470,6 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       expand.innerHTML = `${icon(source.expanded ? "chevron-up" : "chevron-down")}${source.expanded ? "收起" : "展开"}`;
       expand.setAttribute("aria-expanded", String(source.expanded)); createIcons({ icons }); return;
     }
-    if (action === "move") {
-      const from = module.sources.indexOf(source), to = from + Number(trigger.dataset.direction);
-      if (to < 0 || to >= module.sources.length) return;
-      module.sources.splice(from, 1); module.sources.splice(to, 0, source); touch(); refreshSources(); return;
-    }
     if (action === "remove-source") { module.sources = module.sources.filter((entry) => entry.id !== id); touch(); refreshSources(); return; }
     if (action === "clear-sources") { module.sources = []; touch(); refreshSources(); return; }
     if (action === "all") {
@@ -422,7 +519,7 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       else if (field === "precision") metric.precision = Number(el.value);
       else if (field === "report") metric.showInReport = el.checked;
       else metric[field] = el.value;
-      touch(); refreshCalculationIssues(); return true;
+      touch(); refreshReportOrder(); refreshCalculationIssues(); return true;
     }
     if (model.startsWith("mod-field.")) {
       const key = model.slice(10);
@@ -458,7 +555,7 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       column.querySelector(".am-search-empty").hidden = choices.some((choice) => !choice.hidden); return true;
     }
     const source = module.sources.find((source) => source.id === el.dataset.sourceId);
-    if (model === "mod-report") { source.showInReport = el.checked; touch(); return true; }
+    if (model === "mod-report") { source.showInReport = el.checked; touch(); refreshReportOrder(); return true; }
     if (model === "mod-choice") {
       const key = el.dataset.kind === "metric" ? "metricKeys" : "dimensionKeys";
       source[key] = el.checked ? [...new Set([...source[key], el.value])] : source[key].filter((value) => value !== el.value);
@@ -469,8 +566,66 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
   document.addEventListener("pointerdown", (event) => {
     outlet.querySelectorAll(".am-multi-select[open]").forEach((menu) => { if (!menu.contains(event.target)) menu.open = false; });
   });
+  const clearOrderDrag = () => {
+    outlet.querySelectorAll(".am-order-dragging, .am-order-drop-target").forEach(el => el.classList.remove("am-order-dragging", "am-order-drop-target"));
+    draggedOrder = null;
+  };
+  const dropTarget = event => {
+    if (!draggedOrder) return null;
+    const selector = draggedOrder.kind === "blocks" ? ".am-order-block" : ".am-order-chip, .am-calc-row";
+    const target = event.target.closest(selector);
+    if (!target || target.dataset.orderKind !== draggedOrder.kind
+      || (draggedOrder.kind !== "blocks" && target.dataset.orderBlock !== draggedOrder.block)
+      || target.dataset.orderKey === draggedOrder.key) return null;
+    return target;
+  };
+  outlet.addEventListener("dragstart", event => {
+    const grip = event.target.closest('[draggable="true"][data-order-kind]');
+    if (!grip) return;
+    draggedOrder = { kind: grip.dataset.orderKind, block: grip.dataset.orderBlock, key: grip.dataset.orderKey,
+      fromRow: Boolean(grip.closest(".am-calc-row")) };
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", draggedOrder.key);
+    (grip.closest(".am-order-chip, .am-calc-row, .am-order-block") || grip).classList.add("am-order-dragging");
+  });
+  outlet.addEventListener("dragover", event => {
+    const target = dropTarget(event);
+    outlet.querySelectorAll(".am-order-drop-target").forEach(el => el.classList.remove("am-order-drop-target"));
+    if (!target) return;
+    event.preventDefault(); event.dataTransfer.dropEffect = "move";
+    target.classList.add("am-order-drop-target");
+  });
+  outlet.addEventListener("drop", event => {
+    const target = dropTarget(event), dragged = draggedOrder;
+    if (!target) { clearOrderDrag(); return; }
+    event.preventDefault();
+    const targetKey = target.dataset.orderKey;
+    clearOrderDrag();
+    const selector = dragged.fromRow ? `.am-calc-row .am-order-grip[data-order-key="${CSS.escape(dragged.key)}"]`
+      : `.am-report-order [draggable="true"][data-order-key="${CSS.escape(dragged.key)}"][data-order-kind="${dragged.kind}"]`;
+    reorder(dragged.kind, dragged.block, dragged.key, targetKey, selector);
+  });
+  outlet.addEventListener("dragend", clearOrderDrag);
   outlet.addEventListener("keydown", (event) => {
+    const tab = event.target.closest('.am-configuration-tabs [role="tab"]');
+    if (tab && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      event.preventDefault();
+      const key = event.key === "Home" ? "existing" : event.key === "End" ? "calculated"
+        : tab.dataset.tab === "existing" ? "calculated" : "existing";
+      configurationTabs.set(store.analysis.id, key); refreshConfigurationVisibility();
+      outlet.querySelector(`#am-tab-${key}`).focus(); return;
+    }
+    const grip = event.target.closest('[draggable="true"][data-order-kind]');
+    if (grip && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+      event.preventDefault();
+      const { orderKind: kind, orderBlock: block, orderKey: key } = grip.dataset;
+      const keys = orderKeys(kind, block), direction = ["ArrowLeft", "ArrowUp"].includes(event.key) ? -1 : 1;
+      const selector = grip.closest(".am-calc-row") ? `.am-calc-row .am-order-grip[data-order-key="${CSS.escape(key)}"]`
+        : `.am-report-order [draggable="true"][data-order-key="${CSS.escape(key)}"][data-order-kind="${kind}"]`;
+      reorder(kind, block, key, keys[keys.indexOf(key) + direction], selector); return;
+    }
     if (event.key !== "Escape") return;
+    clearOrderDrag();
     const menu = outlet.querySelector(".am-multi-select[open]");
     if (menu) { menu.open = false; menu.querySelector("summary").focus(); }
   });

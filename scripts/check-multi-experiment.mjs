@@ -8,7 +8,10 @@ import {
 import { reportDescriptor, renderMultiReport, multiAnswer } from "../src/multi-experiment-report.js";
 import { moduleView, singleScope } from "../src/multi-report-content.js";
 
-const metricSource = { id: "test-source", capabilityId: "demo-comparison", version: 1, showInReport: true, metricKeys: comparisonMetrics.map(metric => metric.key), dimensionKeys: ["overall", "demo-spend"] };
+const metricSource = { id: "test-source", capabilityId: "demo-comparison", version: 1,
+  definition: { id: "demo-comparison", name: "独立实验核心指标（模拟）",
+    metrics: comparisonMetrics.map(field => ({ ...field, type: "number", role: "metric" })), dimensions: [] },
+  showInReport: true, metricKeys: comparisonMetrics.map(metric => metric.key), dimensionKeys: ["overall", "demo-spend"] };
 const modules = [["multi-core", "multi"], ["multi-strategy", "multi"], ["multi-detail", "multi"], ["single-demo-core", "single"]]
   .map(([id, analysisType]) => ({ id, name: id, enabled: true, versions: [{
     number: 1, configuration: { name: id, analysisType, sources: [copy(metricSource)], reasoning: "独立实验分析" }
@@ -177,7 +180,9 @@ check("首页模块生成正式报告，固定选择顺序及发布版本，不�
   const saved = createTaskReport(moduleStore, moduleTask), report = reportDescriptor(saved);
   assert.equal(saved.private, false);
   assert(report.meta.some(([label, value]) => label === "模块版本" && value.includes("multi-detail · v1")));
-  assert(renderMultiReport(report, {}).includes("DEMO-001"));
+  const html = renderMultiReport(report, {});
+  assert(html.includes("DEMO-001") && html.includes('class="mx-experiment-row"'));
+  assert(!html.includes("data-mm-select"));
 });
 const original = copy(draft);
 const task = createAnalysisTask(store, draft);
@@ -233,7 +238,9 @@ check("窗口和人群差异明确标示解释边界", () => {
 check("报告展示与追问来源相同；视图筛选不改写快照", () => {
   const report = reportDescriptor(complete), view = {};
   const html = renderMultiReport(report, view);
-  assert(html.includes("DEMO-001") && html.includes("消费力分层"));
+  assert(html.includes("DEMO-001") && html.includes('class="mx-experiment-row"'));
+  assert(!html.includes("data-mm-select"));
+  assert(report.moduleContent[0].experiments[0].datasets.some(dataset => dataset.mode === "demo-spend"));
   const before = JSON.stringify(complete);
   moduleView(view, report.moduleContent[0]).experimentId = "DEMO-002"; renderMultiReport(report, view);
   assert.equal(JSON.stringify(complete), before);

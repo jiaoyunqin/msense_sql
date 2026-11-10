@@ -1,4 +1,5 @@
 import source from "./report-reference-data.json";
+import { renderReportSummary } from "./report-summary.js";
 
 const esc = value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const cleanConclusion = text => text.replace(/^(?:实验核心结论|分析结论)\nAI\n\n/, "");
@@ -12,6 +13,14 @@ function prose(text) {
     return `<p>${esc(part)}</p>`;
   }).join("");
 }
+function summaryBlocks(text) {
+  return cleanConclusion(text).split("\n\n").map(part => {
+    const lines = part.split("\n");
+    if (lines.length > 1) return { list: lines };
+    if (["分维度增量来源", "领券核销", "preAA 验证通过"].includes(part)) return { h: part };
+    return { text: part };
+  });
+}
 const ask = id => `<button type="button" class="ask-btn mm-ai" data-ask="${id}" aria-label="向 AI 提问：${esc(id === "ref-summary" ? "实验核心结论" : "分析结论")}">AI</button>`;
 export function referenceDescriptor() {
   const children = (start, end, number) => source.modules.slice(start, end).map((module, i) => ({
@@ -20,7 +29,7 @@ export function referenceDescriptor() {
     kind: "实验报告", title: source.title, createdAt: source.capturedAt,
     meta: [["实验", "品类增长-应季趋势类目券包-基线策略"], ["Libra ID", "5640220"],
       ["实验周期", "2026-08-28 至 2026-09-03"], ["观察窗口", "2026-08-28 至 2026-09-17"]],
-    summary: { id: "ref-summary", title: "实验核心结论" },
+    summary: { id: "ref-summary", title: "实验核心结论", blocks: summaryBlocks(source.summary) },
     sections: [{ id: scope(source.modules[0]), title: "实验背景和配置", no: "01" },
       { id: scope(source.modules[1]), title: "preAA", no: "02" },
       { title: "核心指标表现", no: "03", group: true, children: children(2, 7, 3) },
@@ -57,7 +66,7 @@ export function renderReferenceReport(report, view) {
   return `<header class="rhead mm-report-header"><p class="eyebrow">实验分析报告</p><h1>${esc(report.title)}</h1>
     <dl class="meta">${report.meta.map(([label, value]) => `<div><dt>${label}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl>
     <p class="mm-report-sub">线上报告复刻样例 · <a href="${source.source}" target="_blank" rel="noreferrer">查看来源</a> · 采集于 2026-11-08</p></header>
-    <section class="sec reference-summary" id="sec-ref-summary" data-sec="ref-summary"><div class="ccard"><div class="ccard-h"><span class="t">实验核心结论</span><span class="grow"></span>${ask("ref-summary")}</div>${prose(source.summary)}</div></section>
+    ${renderReportSummary(report.summary)}
     ${source.modules.map(module => {
       const state = view.referenceTables[module.id] ||= { group: "全部", transposed: false }, id = scope(module);
       return `<section class="sec reference-module" id="sec-${id}" data-sec="${id}" data-mm-section="${id}">

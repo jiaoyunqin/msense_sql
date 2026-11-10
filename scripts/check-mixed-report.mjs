@@ -11,6 +11,8 @@ import { moduleView, singleScope, datasetScope, demoModuleReport, demoMixedModul
 import { preAAMetrics } from "../src/pre-aa-demo.js";
 
 const source = { id: "comparison-source", kind: "rpc", capabilityId: "demo-comparison", version: 1,
+  definition: { id: "demo-comparison", name: "独立实验核心指标（模拟）",
+    metrics: comparisonMetrics.map(field => ({ ...field, type: "number", role: "metric" })), dimensions: [] },
   showInReport: true, metricKeys: comparisonMetrics.map(field => field.key), dimensionKeys: ["overall", "demo-spend"] };
 const preAA = { id: "pre-aa-source", kind: "rpc", capabilityId: "pre-aa", version: 1,
   definition: { id: "pre-aa", name: "PreAA指标", metrics: preAAMetrics, dimensions: [] },
@@ -113,7 +115,12 @@ check("单实验模块使用实验下拉框，每次只展示一份结论与数�
   assert(!preAASection.includes("data-mm-tab=") && !preAASection.includes('role="tabpanel"'));
   assert(!preAASection.includes("多实验分析结论"));
   assert(preAASection.includes("不能据此判定 AA 通过"));
-  assert(html.includes('data-mm-select="mm-1"'));
+  assert(!html.includes('data-mm-select="mm-1"'));
+  const multiSection = html.slice(html.indexOf('data-mm-section="mm-1"'));
+  assert(multiSection.includes("多实验分析结论") && !multiSection.includes("单实验分析结论"));
+  assert(!multiSection.includes('data-ask="mm-1-exp-'));
+  assert(multiSection.includes("数据明细"));
+  assert(multiSection.includes('class="mx-experiment-row"') && multiSection.includes('class="mx-group-row"'));
   const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map(match => match[1]);
   assert.equal(new Set(ids).size, ids.length);
 });
@@ -161,7 +168,7 @@ check("操作实验 B 的表格不会修改实验 A、C 或多实验模块的选
   assert.equal(JSON.stringify(saved), frozenReport);
 });
 
-check("两个单实验模块和多实验模块的下拉选择各自独立", () => {
+check("两个单实验模块的下拉独立，多实验模块拒绝旧下拉事件", () => {
   const isolated = copy(saved), duplicate = copy(isolated.snapshot.modules[0]);
   duplicate.id = "second-pre-aa";
   isolated.snapshot.modules.push(duplicate);
@@ -171,6 +178,7 @@ check("两个单实验模块和多实验模块的下拉选择各自独立", () =
   applyModuleReportEvent(selectEvent("mm-0", "DEMO-002"), descriptor, tabsView);
   assert.equal(moduleView(tabsView, descriptor.moduleContent[2]).experimentId, "DEMO-003");
   assert.equal(moduleView(tabsView, descriptor.moduleContent[1]).experimentId, "DEMO-003");
+  assert.equal(applyModuleReportEvent(selectEvent("mm-1", "DEMO-002"), descriptor, tabsView), false);
   applyModuleReportEvent(selectEvent("mm-2", "DEMO-001"), descriptor, tabsView);
   assert.equal(moduleView(tabsView, descriptor.moduleContent[0]).experimentId, "DEMO-002");
   assert.equal(JSON.stringify(saved), frozenReport);
@@ -250,6 +258,7 @@ check("稳定混合报告展示 PreAA 与综合分析，原多实验样例保留
   assert.equal(mixed.moduleContent[0].experiments.every(experiment => experiment.datasets.length === 1), true);
   const content = renderMultiReport(mixed, {});
   assert(content.includes('data-mm-select="mm-0"'));
-  assert(content.includes('data-mm-select="mm-1"'));
+  assert(!content.includes('data-mm-select="mm-1"'));
+  assert(content.includes('class="mx-experiment-row"'));
 });
 console.log(`\n${checks} 项混合模块报告验收通过。`);

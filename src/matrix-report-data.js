@@ -3,6 +3,7 @@ import { couponIntervalCapability, couponIntervalMetrics } from "./coupon-interv
 import { validateCalculatedMetrics } from "./analysis-module-calculations.js";
 import { localCalculationContext } from "./analysis-module-calculation-runtime.js";
 import { findExperimentResult, reportExperimentKey, selectedCandidateId, repeatedLibraId, experimentLabel } from "./experiment-identity.js";
+import { applyModuleDatasetOrder } from "./analysis-module-report-order.js";
 
 export const matrixPresentation = "matrix-demo-v1";
 const clone = value => structuredClone(value);
@@ -197,7 +198,7 @@ function calculationProblem(module, record, fields, entry) {
   return "";
 }
 
-// The bundled demo captures numeric evidence once. Readers never parse display strings,
+// Project saved numeric evidence only. Readers never parse display strings,
 // recalculate results, or use table titles/row positions as join keys.
 export function captureMatrixSnapshot(report) {
   const entries = report.snapshot.experiments.map(entry => repeatedLibraId(report.snapshot, entry.input.id)
@@ -230,9 +231,9 @@ export function captureMatrixSnapshot(report) {
             rows: rawSourceRows(result, entry, source, registration, fields) };
         }) });
     }
-    const calculations = entries.flatMap(entry =>
+    const calculations = module.configuration.calculatedMetrics?.some(metric => metric.showInReport) ? entries.flatMap(entry =>
       (findExperimentResult(report.results, entry, report.snapshot)?.moduleCalculations?.[module.id]?.records || [])
-        .map(record => ({ record, entry })));
+        .map(record => ({ record, entry }))) : [];
     const modes = [...new Set(calculations.filter(({ record }) => record.modeId === "overall").map(({ record }) => record.modeId))];
     for (const mode of modes) {
       const candidates = calculations.filter(({ record }) => record.modeId === mode);
@@ -269,7 +270,7 @@ export function captureMatrixSnapshot(report) {
             }) };
         }) });
     }
-    return { moduleId: module.id, datasets, issues };
+    return { moduleId: module.id, datasets: applyModuleDatasetOrder(module.configuration, datasets), issues };
   });
 }
 
@@ -294,7 +295,10 @@ function contractProblem(expected, actual, field) {
   return "";
 }
 export function buildMatrixComparisons(report, module) {
-  const saved = report.matrixSnapshot?.find(item => item.moduleId === module.moduleId);
+  // Existing matrix snapshots remain authoritative, including an explicitly empty one.
+  // Older and newly generated reports use the same projection without writing it back.
+  const snapshot = report.matrixSnapshot ?? captureMatrixSnapshot(report);
+  const saved = snapshot.find(item => item.moduleId === module.moduleId);
   if (!saved) return { datasets: [], issues: ["当前模块无可对齐的整体数据"] };
   const issues = [...saved.issues], datasets = [];
   for (const dataset of saved.datasets) {

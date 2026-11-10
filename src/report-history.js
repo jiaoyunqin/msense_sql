@@ -394,7 +394,7 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
     if (report.moduleReport) {
       root.classList.remove("agent-hidden"); shell.classList.remove("report-agent-hidden");
       const section = $(`#sec-${scope}`);
-      session().quote = section?.querySelector(".mm-conclusion > ul")?.textContent?.trim().slice(0, 400) || findSec(report, scope).title;
+      session().quote = section?.querySelector("[data-summary-body], .mm-conclusion > ul")?.textContent?.trim().slice(0, 400) || findSec(report, scope).title;
       session().quoteScope = scope; save(); renderAgent(); if (narrow()) setExpanded(true);
       $("#aiText").focus({ preventScroll: true }); return;
     }
