@@ -1,5 +1,5 @@
 import { moduleView } from "./multi-report-content.js";
-import { matrixView, matrixSelection, findMatrixCell } from "./matrix-report-data.js";
+import { matrixView, matrixSelection, findMatrixCell, matrixTables, matrixFieldKey, matrixTableForDataset, matrixTableScope } from "./matrix-report-data.js";
 
 const esc = value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const attr = ([name, value]) => `[${name}=${JSON.stringify(value)}]`;
@@ -17,11 +17,11 @@ function auxiliaryHTML(cell) {
     ${cell.sig ? `<small>${esc(cell.sig)}</small>` : ""}
     ${Object.hasOwn(cell, "uplift") || cell.sig ? "<small>相对本实验对照组</small>" : ""}`;
 }
-function cellHTML(module, column, field) {
-  const cell = column.cells[field.key];
+function cellHTML(module, dataset, column, field) {
+  const cell = column.cells[matrixFieldKey(field)];
   const description = `${column.experimentName} · ${columnLabel(column)} / ${column.groupName} · ${column.groupId} / ${field.name}：${numberText(cell, field)} ${field.unit || ""}${cell.reason ? `；${cell.reason}` : ""}`;
   return `<td><button type="button" class="mx-cell" data-matrix-cell="${cell.token}" data-matrix-module="${module.id}"
-    data-matrix-key="${esc(cell.evidence.datasetKey)}" data-cell-status="${cell.status}" aria-label="${esc(description)}" title="${esc(description)}">
+    data-matrix-key="${esc(dataset.key)}" data-cell-status="${cell.status}" aria-label="${esc(description)}" title="${esc(description)}">
     <span>${numberText(cell, field)}</span>${cell.status !== "value" ? `<small>${statuses[cell.status] || "未提供"}</small>` : ""}
     ${auxiliaryHTML(cell)}</button></td>`;
 }
@@ -36,7 +36,7 @@ function experimentHeader(column) {
 }
 function scopeHTML(module, dataset, reading, selection) {
   const key = `data-matrix-key="${esc(dataset.key)}"`;
-  const id = `${module.id}-matrix-data-${module.comparison.datasets.indexOf(dataset)}`;
+  const id = matrixTableScope(module, dataset);
   const groups = [...new Set(dataset.columns.map(column => column.experimentId))].map(id =>
     dataset.columns.filter(column => column.experimentId === id));
   const query = reading.search.trim().toLocaleLowerCase();
@@ -65,15 +65,16 @@ function scopeHTML(module, dataset, reading, selection) {
 }
 export function matrixHTML(module, state) {
   const id = `${module.id}-matrix`;
-  if (!module.comparison.datasets.length) return `<section class="sec mx-section" id="sec-${id}" data-sec="${id}">
+  const tables = matrixTables(module.comparison);
+  if (!tables.length) return `<section class="sec mx-section" id="sec-${id}" data-sec="${id}">
     <div class="mm-unavailable" role="status"><p>当前模块无可对齐的整体数据。</p>
     ${module.comparison.issues.length ? `<p>${esc(module.comparison.issues.join("；"))}</p>` : ""}</div></section>`;
-  return `<div id="sec-${id}">${module.comparison.datasets.map((dataset, index) =>
-    matrixTableHTML(module, state, dataset, index)).join("")}
+  return `<div id="sec-${id}">${tables.map(dataset =>
+    matrixTableHTML(module, state, dataset)).join("")}
     ${module.comparison.issues.length ? `<p class="mx-notice">${esc(module.comparison.issues.join("；"))}</p>` : ""}</div>`;
 }
-function matrixTableHTML(module, state, dataset, index) {
-  const { reading } = matrixView(state, module.comparison, dataset.key), id = `${module.id}-matrix-data-${index}`;
+function matrixTableHTML(module, state, dataset) {
+  const { reading } = matrixView(state, module.comparison, dataset.key), id = matrixTableScope(module, dataset);
   const key = `data-matrix-key="${esc(dataset.key)}"`;
   const selection = matrixSelection(dataset, reading), { columns } = selection;
   const groups = [...new Set(columns.map(column => column.experimentId))].map(experimentId =>
@@ -83,13 +84,13 @@ function matrixTableHTML(module, state, dataset, index) {
       `<th scope="col">${esc(field.name)}${field.unit ? `<small>${esc(field.unit)}</small>` : ""}</th>`).join("")}</tr></thead><tbody>
       ${groups.map(group => group.map((column, index) => `<tr>${index === 0 ? `<th class="mx-fixed" scope="rowgroup" rowspan="${group.length}">${experimentHeader(column)}</th>` : ""}
         <th class="mx-group-fixed" scope="row">${esc(column.groupName)}<small>${esc(column.groupId)}${column.control ? " · 对照组" : ""}</small></th>
-        ${dataset.fields.map(field => cellHTML(module, column, field)).join("")}</tr>`).join("")).join("")}</tbody></table>`
+        ${dataset.fields.map(field => cellHTML(module, dataset, column, field)).join("")}</tr>`).join("")).join("")}</tbody></table>`
     : `<table class="mm-table mx-table"><thead><tr class="mx-experiment-row"><th class="mx-fixed" rowspan="2" scope="col">指标</th>${groups.map(group =>
       `<th colspan="${group.length}" scope="colgroup" class="mx-group-start">${experimentHeader(group[0])}</th>`).join("")}</tr>
       <tr class="mx-group-row">${groups.map(group => group.map((column, index) =>
         `<th scope="col" class="${index === 0 ? "mx-group-start" : ""}">${esc(column.groupName)}<small>${esc(column.groupId)}${column.control ? " · 对照组" : ""}${Object.values(column.cells).every(cell => cell.status !== "value") ? " · 数据不可用" : ""}</small></th>`).join("")).join("")}</tr></thead>
       <tbody>${dataset.fields.map(field => `<tr><th class="mx-fixed" scope="row" title="${esc(field.description || field.formulaText || "")}">${esc(field.name)}${field.unit ? `<small>${esc(field.unit)}</small>` : ""}</th>
-        ${columns.map(column => cellHTML(module, column, field)).join("")}</tr>`).join("")}</tbody></table>`;
+        ${columns.map(column => cellHTML(module, dataset, column, field)).join("")}</tr>`).join("")}</tbody></table>`;
   return `<section class="sec mx-section" id="sec-${id}" data-sec="${id}"><div class="tblock mx-block" id="tb-${id}">
     <h3 class="mm-dataset-title">${esc(dataset.title)}</h3>
     <div class="mx-toolbar">${scopeHTML(module, dataset, reading, selection)}<div class="mm-table-tools">
@@ -105,12 +106,13 @@ export function focusMatrixEvidence(module, state, token) {
   const found = findMatrixCell(module.comparison, token);
   if (!found) return false;
   const { matrix } = matrixView(state, module.comparison);
-  matrix.datasetKey = found.dataset.key;
+  const table = matrixTableForDataset(module.comparison, found.dataset.key);
+  matrix.datasetKey = table.key;
   const { reading } = matrixView(state, module.comparison);
   reading.evidence = token;
   if (!reading.selected.includes(found.column.key)) reading.selected.push(found.column.key);
   state.experimentId = found.column.experimentId;
-  return { moduleId: module.id, scope: `${module.id}-matrix-data-${module.comparison.datasets.indexOf(found.dataset)}`, scroll: true,
+  return { moduleId: module.id, scope: matrixTableScope(module, table), scroll: true,
     focus: `[data-matrix-cell="${token}"]` };
 }
 export function applyMatrixEvent(event, report, view) {
@@ -122,7 +124,7 @@ export function applyMatrixEvent(event, report, view) {
   const data = target.dataset;
   const { dataset, reading } = matrixView(state, module.comparison, data.matrixKey);
   if (data.matrixKey !== undefined && !dataset) return false;
-  const control = name => `${attr([name, target.getAttribute?.(name) ?? ""])}[data-matrix-module="${module.id}"]${data.matrixKey !== undefined ? attr(["data-matrix-key", data.matrixKey]) : ""}`;
+  const control = name => `${attr([name, target.getAttribute?.(name) ?? ""])}[data-matrix-module="${module.id}"]${data.matrixKey !== undefined ? attr(["data-matrix-key", dataset.key]) : ""}`;
   let focus;
   if (event.type === "input" && "matrixSearch" in data && reading) {
     reading.search = target.value;

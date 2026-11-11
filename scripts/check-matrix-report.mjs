@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { demoModuleReport, demoMixedModuleReport, demoMatrixModuleReport, buildReportModules, moduleView, datasetScope, singleScope } from "../src/multi-report-content.js";
 import { reportDescriptor, reportListRow, renderMultiReport, applyModuleReportEvent, prepareModuleCitation, multiAnswer } from "../src/multi-experiment-report.js";
-import { captureMatrixSnapshot, buildMatrixComparisons, matrixPresentation, matrixView, matrixSelection, matrixEvidenceScope, locateMatrixEvidence } from "../src/matrix-report-data.js";
+import { captureMatrixSnapshot, buildMatrixComparisons, buildMatrixTables, matrixPresentation, matrixView, matrixSelection, matrixEvidenceScope, locateMatrixEvidence, matrixTables, matrixFieldKey, matrixTableForDataset, matrixTableScope, findMatrixCell } from "../src/matrix-report-data.js";
 import { computeModuleCalculations, comparisonCalculationRecords } from "../src/analysis-module-calculation-runtime.js";
 import { initializeMultiAnalysis, experimentInput, createAnalysisTask, executeAnalysisTask, createTaskReport } from "../src/multi-experiment-data.js";
 
@@ -192,7 +192,7 @@ check("整体核销间隔按 3 实验、4 策略组和 6 指标逐值对齐，�
   assert(!html.includes("data-matrix-view"));
   assert(!html.includes("data-matrix-open"));
   assert(!html.includes("单实验明细"));
-  assert.equal((html.match(/class="mm-table mx-table"/g) || []).length, 3);
+  assert.equal((html.match(/class="mm-table mx-table"/g) || []).length, 2);
   assert.equal((html.match(/<select/g) || []).length, 0);
   assert(!html.includes("data-matrix-dataset"));
   assert(!html.includes("固定模拟数据；"));
@@ -295,6 +295,62 @@ check("计算指标使用独立整体数据集与已保存计算定义、输入�
     assert.equal(column.cells["demo-gmv-per-dac"].sig, undefined);
   }
   assert(!module.comparison.datasets.some(dataset => dataset.mode.includes("demo-spend")));
+});
+
+check("原指标与计算指标融合为一张 9×7 表，字段顺序、数值及来源证据保持不变", () => {
+  const saved = fresh(), before = JSON.stringify(saved), report = descriptor(freeze(saved));
+  const module = report.moduleContent[0], comparison = module.comparison, [table] = matrixTables(comparison);
+  assert.equal(comparison.datasets.length, 2);
+  assert.equal(comparison.tables.length, 1);
+  assert.equal(table.title, "指标明细（整体）");
+  assert.equal(table.fields.length, 9);
+  assert.equal(table.columns.length, 7);
+  assert.deepEqual(table.fields.map(field => field.key), comparison.datasets.flatMap(dataset => dataset.fields.map(field => field.key)));
+  for (const field of table.fields) for (const column of table.columns) {
+    const original = comparison.datasets.find(dataset => dataset.key === field.datasetKey);
+    const cell = column.cells[matrixFieldKey(field)];
+    assert.equal(cell, original.columns.find(item => item.key === column.key).cells[field.key]);
+    assert.equal(findMatrixCell(comparison, cell.token).dataset.key, original.key);
+  }
+  const html = renderMultiReport(report, {});
+  assert(!html.includes(">核心指标（整体）<") && !html.includes(">计算指标（整体）<"));
+  assert.equal((html.match(/data-matrix-transpose data-matrix-module="mm-0"/g) || []).length, 1);
+  assert.equal(JSON.stringify(saved), before);
+});
+
+check("融合只按已登记整体粒度及组身份进行，隐藏原来源或粒度不兼容时保持独立", () => {
+  const datasets = descriptor(fresh()).moduleContent[0].comparison.datasets;
+  const mismatch = copy(datasets);
+  mismatch[1].contract.metrics[0].definition.inputs[0].grain = "other-population";
+  assert.equal(buildMatrixTables(mismatch).length, 2);
+  assert.equal(buildMatrixTables([datasets[1]]).length, 1);
+  assert.equal(buildMatrixTables([datasets[1]])[0].fields.length, 1);
+  const conflict = copy(datasets);
+  conflict[1].columns[0].control = false;
+  assert.equal(buildMatrixTables(conflict).length, 2);
+});
+
+check("融合按实验与组 Key 对齐，来源缺列保留缺失，同名指标不会覆盖", () => {
+  const datasets = copy(descriptor(fresh()).moduleContent[0].comparison.datasets);
+  const [core, calculation] = datasets;
+  const missingKey = calculation.columns[1].key, coreOnlyKey = core.columns[2].key;
+  calculation.columns = calculation.columns.filter(column => column.key !== missingKey).reverse();
+  core.columns = core.columns.filter(column => column.key !== coreOnlyKey);
+  const [table] = buildMatrixTables(datasets);
+  assert.equal(table.columns.length, 7);
+  assert.equal(table.columns.find(column => column.key === missingKey).cells["demo-gmv-per-dac"].status, "unavailable");
+  assert.equal(table.columns.find(column => column.key === coreOnlyKey).cells.dac.status, "unavailable");
+  for (const column of calculation.columns)
+    assert.equal(table.columns.find(item => item.key === column.key).cells["demo-gmv-per-dac"], column.cells["demo-gmv-per-dac"]);
+  const sameKey = copy(descriptor(fresh()).moduleContent[0].comparison.datasets);
+  sameKey[1].fields[0].key = "dac";
+  sameKey[1].columns.forEach(column => { column.cells = { dac: column.cells["demo-gmv-per-dac"] }; });
+  const [collision] = buildMatrixTables(sameKey);
+  const fields = collision.fields.filter(field => field.key === "dac");
+  assert.equal(fields.length, 2);
+  assert.notEqual(matrixFieldKey(fields[0]), matrixFieldKey(fields[1]));
+  fields.forEach(field => assert.equal(collision.columns[1].cells[matrixFieldKey(field)],
+    sameKey.find(dataset => dataset.key === field.datasetKey).columns[1].cells.dac));
 });
 
 check("来源版本、粒度、单位、指标语义或精度冲突均保留原因，不对齐异常数值", () => {
@@ -580,7 +636,7 @@ check("显示范围默认全选；搜索不清除隐藏选择；清空、单实�
   assert.equal(reading.search, "DEMO-002");
 });
 
-check("矩阵各指标表的范围、搜索与转置独立，旧阅读状态不恢复单实验结论", () => {
+check("原指标与计算指标共用范围、搜索与转置，其他模块保持独立", () => {
   const report = descriptor(fresh()), view = {};
   renderMultiReport(report, view);
   const { module, dataset, reading, state } = stateFor(report, view);
@@ -591,14 +647,16 @@ check("矩阵各指标表的范围、搜索与转置独立，旧阅读状态不�
   const selected = [...reading.selected];
   assert.equal(matrixEvent(report, view, module, { matrixDataset: "" }, module.comparison.datasets[1].key, "change"), false);
   const calculation = stateFor(report, view, 0, module.comparison.datasets[1].key);
-  assert.equal(calculation.reading.transposed, false);
+  assert.equal(calculation.reading, reading);
+  assert.equal(calculation.reading.transposed, true);
+  assert.deepEqual(calculation.reading.selected, selected);
   matrixEvent(report, view, module, { matrixClear: "", matrixKey: calculation.dataset.key });
   matrixEvent(report, view, module, { matrixSearch: "", matrixKey: calculation.dataset.key }, "DEMO-003", "input");
   state.experimentId = "DEMO-003"; // Previously saved reading state must not restore removed content.
   assert.equal(calculation.reading.selected.length, 0);
-  assert.equal(reading.search, "");
+  assert.equal(reading.search, "DEMO-003");
   assert.equal(reading.transposed, true);
-  assert.deepEqual(reading.selected, selected);
+  assert.deepEqual(reading.selected, []);
   assert.equal(state.experimentId, "DEMO-003");
   assert.equal(stateFor(report, view, 1).state.experimentId, "DEMO-001");
   assert.equal(stateFor(report, view, 1).reading.selected.length, 4);
@@ -606,10 +664,10 @@ check("矩阵各指标表的范围、搜索与转置独立，旧阅读状态不�
   assert.equal(state.matrix.datasetKey, dataset.key);
   const html = renderMultiReport(report, view);
   assert(!html.includes("单实验分析结论") && !html.includes("data-mm-select"));
-  assert(html.includes('id="sec-mm-0-matrix-data-0"') && html.includes('id="sec-mm-0-matrix-data-1"'));
+  assert(html.includes('id="sec-mm-0-matrix-data-0"') && !html.includes('id="sec-mm-0-matrix-data-1"'));
   const blocks = html.split('class="sec mx-section"');
-  assert(blocks[1].includes("mx-transposed"));
-  assert(blocks[2].includes("当前无可见数据") && !blocks[2].includes("mx-transposed"));
+  assert(blocks[1].includes("当前无可见数据"));
+  assert(blocks[2].includes("mx-table") && !blocks[2].includes("mx-transposed"));
   assert.equal(JSON.stringify(report.moduleContent.map(module => module.conclusions)), conclusions);
 });
 
@@ -625,9 +683,10 @@ check("每个矩阵引用定位大表格的原实验、数据集、组和指标�
       assert.equal(target.row.groupId, column.groupId);
       const state = moduleView(view, module), tables = copy(state.tables);
       const opened = prepareModuleCitation(report, matrixEvidenceScope(cell.evidence), view);
-      assert.equal(opened.scope, `${module.id}-matrix-data-${module.comparison.datasets.indexOf(dataset)}`);
+      const table = matrixTableForDataset(module.comparison, dataset.key);
+      assert.equal(opened.scope, matrixTableScope(module, table));
       assert.equal(state.experimentId, column.experimentId);
-      assert.equal(state.matrix.datasetKey, dataset.key);
+      assert.equal(state.matrix.datasetKey, table.key);
       assert(opened.focus.includes(cell.token));
       const html = renderMultiReport(report, view);
       assert(html.includes(`data-matrix-cell="${cell.token}"`));
@@ -670,9 +729,9 @@ check("多实验模块目录只保留多实验结论与指标表，旧结论及�
   renderMultiReport(report, view);
   const { module, state } = stateFor(report, view, 1);
   const children = report.sections[1].children;
-  assert.equal(children.length, module.comparison.datasets.length + module.experiments.length + 1);
+  assert.equal(children.length, matrixTables(module.comparison).length + module.experiments.length + 1);
   const visible = children.filter(child => !child.hiddenToc);
-  assert.deepEqual(visible.map(child => child.short), ["多实验分析结论", ...module.comparison.datasets.map(dataset => dataset.title)]);
+  assert.deepEqual(visible.map(child => child.short), ["多实验分析结论", ...matrixTables(module.comparison).map(dataset => dataset.title)]);
   assert(children.slice(1, 1 + module.experiments.length).every(child => child.hiddenToc && child.id.startsWith(`${module.id}-exp-`)));
   assert(children.slice(1 + module.experiments.length).every(child => child.id.startsWith(`${module.id}-matrix-data-`)));
   assert(!children.some(child => child.title.includes("券批次")));
@@ -700,9 +759,12 @@ check("多实验模块目录只保留多实验结论与指标表，旧结论及�
   assert(!html.includes(`id="sec-${singleScope(module.index, "DEMO-002")}"`));
   assert(!html.includes("单实验明细"));
   const core = report.moduleContent[0];
-  const tableItem = report.sections[0].children.find(child => child.id === `${core.id}-matrix-data-1`);
+  const tableItem = report.sections[0].children.find(child => child.id === `${core.id}-matrix-data-0`);
   assert.equal(prepareModuleCitation(report, tableItem.id, view).scope, tableItem.id);
-  assert.equal(moduleView(view, core).matrix.datasetKey, core.comparison.datasets[1].key);
+  assert.equal(prepareModuleCitation(report, `${core.id}-matrix-data-1`, view).scope, tableItem.id);
+  assert.equal(moduleView(view, core).matrix.datasetKey, matrixTables(core.comparison)[0].key);
+  const calculationIndex = core.experiments[0].datasets.findIndex(dataset => dataset.sourceId === "module-calculations" && dataset.mode === "calculated:overall");
+  assert.equal(prepareModuleCitation(report, datasetScope(0, calculationIndex), view).scope, tableItem.id);
 });
 
 check("失败或缺失的引用保持大表格并显示原实验原因", () => {

@@ -128,6 +128,11 @@ check("Matrix snapshots preserve configured row order and remain alignable", () 
   assert.equal(comparison.datasets[0].sourceId, "module-calculations");
   assert(comparison.datasets.every(dataset => dataset.columns.every(column =>
     Object.values(column.cells).every(cell => cell.status !== "unalignable"))));
+  assert.equal(comparison.tables.length, 1);
+  assert.equal(comparison.tables[0].title, "指标明细（整体）");
+  assert.deepEqual(comparison.tables[0].fields.map(field => field.key),
+    [...module.calculatedMetrics.map(metric => metric.key), "gmv", "dac"]);
+  assert.equal(comparison.tables[0].anchorIndex, 0);
 });
 check("Changing current draft after report generation cannot reorder a saved report or published version", () => {
   const frozen = JSON.stringify(report), view = JSON.stringify(buildReportModules(report));

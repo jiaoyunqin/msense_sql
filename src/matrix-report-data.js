@@ -329,16 +329,94 @@ export function buildMatrixComparisons(report, module) {
     }
     datasets.push({ ...dataset, columns });
   }
-  return { datasets, issues };
+  return { datasets, tables: buildMatrixTables(datasets), issues };
+}
+export const matrixTables = comparison => comparison.tables ?? comparison.datasets;
+export const matrixFieldKey = field => field.viewKey ?? field.key;
+export const matrixTableForDataset = (comparison, key) => matrixTables(comparison)
+  .find(table => table.key === key || table.memberKeys?.includes(key));
+export const matrixTableScope = (module, table) => `${module.id}-matrix-data-${table.anchorIndex
+  ?? module.comparison.datasets.indexOf(table)}`;
+
+function presentationGrain(dataset) {
+  if (dataset.mode === "overall" && dataset.contract.capabilityId === "demo-comparison")
+    return dataset.contract.grain;
+  if (dataset.mode !== "calculated:overall") return null;
+  const inputs = dataset.contract.metrics.flatMap(metric => metric.definition?.inputs || []);
+  const grain = inputs[0]?.grain;
+  return typeof grain === "string" && dataset.contract.metrics.every(metric => metric.definition?.inputs?.length)
+    && inputs.every(input => input.grain === grain) ? grain : null;
+}
+// Combine only presentation rows. Source contracts and cell evidence remain authoritative.
+export function buildMatrixTables(datasets) {
+  const groups = new Map();
+  for (const dataset of datasets) {
+    const grain = presentationGrain(dataset);
+    if (grain) {
+      if (!groups.has(grain)) groups.set(grain, []);
+      groups.get(grain).push(dataset);
+    }
+  }
+  const consumed = new Set(), tables = [];
+  for (const [index, dataset] of datasets.entries()) {
+    if (consumed.has(dataset.key)) continue;
+    const candidates = groups.get(presentationGrain(dataset)) || [];
+    const identities = new Map();
+    const compatible = candidates.every(member => {
+      if (new Set(member.columns.map(column => column.key)).size !== member.columns.length) return false;
+      return member.columns.every(column => {
+        const previous = identities.get(column.key);
+        identities.set(column.key, column);
+        return !previous || previous.control === column.control;
+      });
+    });
+    const members = compatible && candidates.some(member => member.mode === "overall")
+      && candidates.some(member => member.mode === "calculated:overall") ? candidates : [dataset];
+    members.forEach(member => consumed.add(member.key));
+    const base = { ...dataset, anchorIndex: index, memberKeys: members.map(member => member.key) };
+    if (members.length === 1) { tables.push(base); continue; }
+    const counts = new Map();
+    members.forEach(member => member.fields.forEach(field => counts.set(field.key, (counts.get(field.key) || 0) + 1)));
+    const fields = members.flatMap(member => member.fields.map(field => ({ ...field,
+      viewKey: counts.get(field.key) > 1 ? identity(member.key, field.key) : field.key,
+      datasetKey: member.key })));
+    const memberColumns = new Map(members.map(member => [member.key, new Map(member.columns.map(column => [column.key, column]))]));
+    const columnsByExperiment = new Map();
+    members.forEach(member => member.columns.forEach(column => {
+      if (!columnsByExperiment.has(column.experimentId)) columnsByExperiment.set(column.experimentId, new Map());
+      const columns = columnsByExperiment.get(column.experimentId);
+      if (!columns.has(column.key)) columns.set(column.key, column);
+    }));
+    const columns = [...columnsByExperiment.values()].flatMap(group => [...group.values()]).map(column => ({
+      ...column, cells: Object.fromEntries(fields.map(field => {
+        let cell = memberColumns.get(field.datasetKey).get(column.key)?.cells[field.key];
+        if (!cell) {
+          const member = members.find(member => member.key === field.datasetKey);
+          const reference = member.columns[0]?.cells[field.key]?.evidence;
+          const evidence = { ...reference, datasetKey: member.key, sourceId: member.sourceId,
+            sourceVersion: member.contract.sourceVersion, mode: member.mode,
+            experimentId: column.experimentId, groupId: column.groupId, metricKey: field.key };
+          cell = { ...numeric(null, "该实验组未提供此指标", "unavailable"), evidence, token: matrixEvidenceToken(evidence) };
+        }
+        return [matrixFieldKey(field), cell];
+      }))
+    }));
+    tables.push({ ...base, title: "指标明细（整体）", fields, columns });
+  }
+  return tables;
 }
 export function matrixView(state, comparison, datasetKey) {
-  state.matrix ||= { datasetKey: comparison.datasets[0]?.key, datasets: {} };
+  const tables = matrixTables(comparison);
+  state.matrix ||= { datasetKey: tables[0]?.key, datasets: {} };
   const matrix = state.matrix;
-  const dataset = comparison.datasets.find(dataset => dataset.key === (datasetKey ?? matrix.datasetKey))
-    || (datasetKey === undefined ? comparison.datasets[0] : null);
+  const dataset = matrixTableForDataset(comparison, datasetKey ?? matrix.datasetKey)
+    || (datasetKey === undefined ? tables[0] : null);
   if (!dataset) return { matrix };
+  const previousKey = datasetKey ?? matrix.datasetKey;
   if (datasetKey === undefined) matrix.datasetKey = dataset.key;
-  const reading = matrix.datasets[dataset.key] ||= { selected: dataset.columns.map(column => column.key),
+  const previous = dataset.memberKeys?.includes(previousKey) && matrix.datasets[previousKey];
+  const reading = matrix.datasets[dataset.key] ||= previous || dataset.memberKeys?.map(key => matrix.datasets[key]).find(Boolean)
+    || { selected: dataset.columns.map(column => column.key),
     transposed: false, search: "", experimentId: state.experimentId };
   return { matrix, dataset, reading };
 }
@@ -349,9 +427,9 @@ export function matrixSelection(dataset, reading) {
       .map(column => column.experimentId)).size };
 }
 export function findMatrixCell(comparison, token) {
-  for (const dataset of comparison.datasets) for (const column of dataset.columns) {
+  for (const dataset of [...comparison.datasets, ...matrixTables(comparison)]) for (const column of dataset.columns) {
     const cell = Object.values(column.cells).find(cell => cell.token === token);
-    if (cell) return { dataset, column, cell };
+    if (cell) return { dataset: comparison.datasets.find(member => member.key === cell.evidence.datasetKey) || dataset, column, cell };
   }
   return null;
 }

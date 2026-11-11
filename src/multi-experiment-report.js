@@ -1,7 +1,7 @@
 import { analysisTypes } from "./multi-experiment-data.js";
 import { buildReportModules, moduleView, moduleScope, singleScope, datasetScope } from "./multi-report-content.js";
 import { normalizeReportStatus } from "./report-filters.js";
-import { matrixPresentation, captureMatrixSnapshot, buildMatrixComparisons, matrixDatasetKey, matrixView, findMatrixCell, matrixEvidenceScope } from "./matrix-report-data.js";
+import { matrixPresentation, captureMatrixSnapshot, buildMatrixComparisons, matrixDatasetKey, matrixView, findMatrixCell, matrixEvidenceScope, matrixTables, matrixTableForDataset, matrixTableScope } from "./matrix-report-data.js";
 import { usesMatrix, matrixHTML, applyMatrixEvent, focusMatrixEvidence } from "./matrix-report-ui.js";
 import { experimentLabel, reportExperimentKey, reportExperimentLabel, repeatedLibraId, selectedCandidateId, findExperimentResult } from "./experiment-identity.js";
 import { buildMultiReportSummary } from "./multi-report-summary.js";
@@ -59,8 +59,8 @@ export function reportDescriptor(saved) {
           id: singleScope(module.index, experiment.id), no: "", title: `${experiment.name} · ${experimentLabel(experiment)}`,
           short: `${experiment.name} · ${experimentLabel(experiment)}`, hiddenToc: true
         })),
-        ...module.comparison.datasets.map((dataset, index) => ({
-          id: `${module.id}-matrix-data-${index}`, no: `${module.index + 1}.${index + 1}`,
+        ...matrixTables(module.comparison).map((dataset, index) => ({
+          id: matrixTableScope(module, dataset), no: `${module.index + 1}.${index + 1}`,
           title: dataset.title, short: dataset.title
         }))] : moduleNavigation(saved, module) })) };
 }
@@ -271,11 +271,12 @@ export function prepareModuleCitation(report, scope, view) {
       || resolved.startsWith(`${singleScope(module.index, experiment.id)}-data-`));
     const matrixIndex = resolved.startsWith(`${module.id}-matrix-data-`)
       ? Number(resolved.slice(`${module.id}-matrix-data-`.length)) : -1;
-    let dataset = module.comparison.datasets[matrixIndex];
+    const originalMatrix = module.comparison.datasets[matrixIndex];
+    let dataset = originalMatrix && matrixTableForDataset(module.comparison, originalMatrix.key);
     if (!dataset && resolved.includes("-data-") && matrixIndex === -1) {
       const selected = experiment || module.experiments.find(item => item.id === state.experimentId);
       const original = selected?.datasets.find((_, index) => resolved === datasetScope(module.index, index, experiment?.id));
-      if (original) dataset = module.comparison.datasets.find(item => item.key === matrixDatasetKey(original));
+      if (original) dataset = matrixTableForDataset(module.comparison, matrixDatasetKey(original));
     }
     if (dataset) matrix.datasetKey = dataset.key;
     if (experiment) {
@@ -284,7 +285,7 @@ export function prepareModuleCitation(report, scope, view) {
         || active?.columns.find(item => item.experimentId === experiment.id);
       if (column) return focusMatrixEvidence(module, state, Object.values(column.cells)[0].token);
     }
-    return { scope: dataset ? `${module.id}-matrix-data-${module.comparison.datasets.indexOf(dataset)}` : `${module.id}-matrix`, moduleId: module.id };
+    return { scope: dataset ? matrixTableScope(module, dataset) : `${module.id}-matrix`, moduleId: module.id };
   }
   const experiment = module.experiments.find(experiment => resolved === singleScope(module.index, experiment.id)
     || resolved?.startsWith(`${singleScope(module.index, experiment.id)}-data-`));
