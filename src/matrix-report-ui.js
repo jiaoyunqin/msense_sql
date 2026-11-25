@@ -1,5 +1,6 @@
 import { moduleView } from "./multi-report-content.js";
 import { matrixView, matrixSelection, findMatrixCell, matrixTables, matrixFieldKey, matrixTableForDataset, matrixTableScope } from "./matrix-report-data.js";
+import { detailTable, detailReading, detailFields, detailRecords, detailFormat, detailControls, detailPanel, detailHeading, detailSortAria, detailValue, detailComparison } from "./report-detail-tools.js";
 
 const esc = value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const attr = ([name, value]) => `[${name}=${JSON.stringify(value)}]`;
@@ -11,19 +12,18 @@ function numberText(cell, field) {
   return cell.value.toLocaleString("zh-CN", { minimumFractionDigits: field.digits, maximumFractionDigits: field.digits,
     style: field.format === "percent" ? "percent" : "decimal" });
 }
-function auxiliaryHTML(cell) {
+function auxiliaryHTML(cell, format) {
   if (!cell.ownControl || cell.status !== "value") return "";
-  return `${Object.hasOwn(cell, "uplift") ? `<small>增幅 ${cell.uplift == null ? "—" : `${cell.uplift > 0 ? "+" : ""}${cell.uplift.toFixed(2)}%`}</small>` : ""}
-    ${cell.sig ? `<small>${esc(cell.sig)}</small>` : ""}
+  return `${detailComparison(cell, format)}
     ${Object.hasOwn(cell, "uplift") || cell.sig ? "<small>相对本实验对照组</small>" : ""}`;
 }
-function cellHTML(module, dataset, column, field) {
+function cellHTML(module, dataset, column, field, model, format) {
   const cell = column.cells[matrixFieldKey(field)];
   const description = `${column.experimentName} · ${columnLabel(column)} / ${column.groupName} · ${column.groupId} / ${field.name}：${numberText(cell, field)} ${field.unit || ""}${cell.reason ? `；${cell.reason}` : ""}`;
   return `<td><button type="button" class="mx-cell" data-matrix-cell="${cell.token}" data-matrix-module="${module.id}"
     data-matrix-key="${esc(dataset.key)}" data-cell-status="${cell.status}" aria-label="${esc(description)}" title="${esc(description)}">
-    <span>${numberText(cell, field)}</span>${cell.status !== "value" ? `<small>${statuses[cell.status] || "未提供"}</small>` : ""}
-    ${auxiliaryHTML(cell)}</button></td>`;
+    ${detailValue(numberText(cell, field), cell.status === "value" ? cell.value : null, model, field, format)}${cell.status !== "value" ? `<small>${statuses[cell.status] || "未提供"}</small>` : ""}
+    ${auxiliaryHTML(cell, format)}</button></td>`;
 }
 function experimentInfo(column) {
   const definition = column.definition;
@@ -63,39 +63,43 @@ function scopeHTML(module, dataset, reading, selection) {
       <div class="mx-scope-options">${content || (visible ? "" : '<p role="status">没有匹配的实验或组别；已选项保持不变。</p>')}</div>
     </div></details>`;
 }
-export function matrixHTML(module, state) {
+export function matrixHTML(module, state, view = {}) {
   const id = `${module.id}-matrix`;
   const tables = matrixTables(module.comparison);
   if (!tables.length) return `<section class="sec mx-section" id="sec-${id}" data-sec="${id}">
     <div class="mm-unavailable" role="status"><p>当前模块无可对齐的整体数据。</p>
     ${module.comparison.issues.length ? `<p>${esc(module.comparison.issues.join("；"))}</p>` : ""}</div></section>`;
   return `<div id="sec-${id}">${tables.map(dataset =>
-    matrixTableHTML(module, state, dataset)).join("")}
+    matrixTableHTML(module, state, dataset, view)).join("")}
     ${module.comparison.issues.length ? `<p class="mx-notice">${esc(module.comparison.issues.join("；"))}</p>` : ""}</div>`;
 }
-function matrixTableHTML(module, state, dataset) {
+function matrixTableHTML(module, state, dataset, view) {
   const { reading } = matrixView(state, module.comparison, dataset.key), id = matrixTableScope(module, dataset);
+  const model = detailTable(module, id, dataset, true), order = detailReading(view, model), format = detailFormat(view, model);
+  const fields = detailFields(model, order);
   const key = `data-matrix-key="${esc(dataset.key)}"`;
-  const selection = matrixSelection(dataset, reading), { columns } = selection;
+  const selection = matrixSelection(dataset, reading), columns = detailRecords(model, order, selection.columns);
   const groups = [...new Set(columns.map(column => column.experimentId))].map(experimentId =>
     columns.filter(column => column.experimentId === experimentId));
   const table = reading.transposed
-    ? `<table class="mm-table mx-table mx-transposed"><thead><tr><th class="mx-fixed">实验 / Libra ID</th><th class="mx-group-fixed">实验组</th>${dataset.fields.map(field =>
-      `<th scope="col">${esc(field.name)}${field.unit ? `<small>${esc(field.unit)}</small>` : ""}</th>`).join("")}</tr></thead><tbody>
+    ? `<table class="mm-table mx-table mx-transposed" data-cf-trend-palette="${format.trendPalette}"><thead><tr><th class="mx-fixed">实验 / Libra ID</th><th class="mx-group-fixed">实验组</th>${fields.map(field =>
+      `<th scope="col"${detailSortAria(field, order)}>${detailHeading(model, field, order)}</th>`).join("")}</tr></thead><tbody>
       ${groups.map(group => group.map((column, index) => `<tr>${index === 0 ? `<th class="mx-fixed" scope="rowgroup" rowspan="${group.length}">${experimentHeader(column)}</th>` : ""}
         <th class="mx-group-fixed" scope="row">${esc(column.groupName)}<small>${esc(column.groupId)}${column.control ? " · 对照组" : ""}</small></th>
-        ${dataset.fields.map(field => cellHTML(module, dataset, column, field)).join("")}</tr>`).join("")).join("")}</tbody></table>`
-    : `<table class="mm-table mx-table"><thead><tr class="mx-experiment-row"><th class="mx-fixed" rowspan="2" scope="col">指标</th>${groups.map(group =>
+        ${fields.map(field => cellHTML(module, dataset, column, field, model, format)).join("")}</tr>`).join("")).join("")}</tbody></table>`
+    : `<table class="mm-table mx-table" data-cf-trend-palette="${format.trendPalette}"><thead><tr class="mx-experiment-row"><th class="mx-fixed" rowspan="2" scope="col">指标</th>${groups.map(group =>
       `<th colspan="${group.length}" scope="colgroup" class="mx-group-start">${experimentHeader(group[0])}</th>`).join("")}</tr>
       <tr class="mx-group-row">${groups.map(group => group.map((column, index) =>
         `<th scope="col" class="${index === 0 ? "mx-group-start" : ""}">${esc(column.groupName)}<small>${esc(column.groupId)}${column.control ? " · 对照组" : ""}${Object.values(column.cells).every(cell => cell.status !== "value") ? " · 数据不可用" : ""}</small></th>`).join("")).join("")}</tr></thead>
-      <tbody>${dataset.fields.map(field => `<tr><th class="mx-fixed" scope="row" title="${esc(field.description || field.formulaText || "")}">${esc(field.name)}${field.unit ? `<small>${esc(field.unit)}</small>` : ""}</th>
-        ${columns.map(column => cellHTML(module, dataset, column, field)).join("")}</tr>`).join("")}</tbody></table>`;
+      <tbody>${fields.map(field => `<tr><th class="mx-fixed" scope="row"${detailSortAria(field, order)} title="${esc(field.description || field.formulaText || "")}">${detailHeading(model, field, order)}</th>
+        ${columns.map(column => cellHTML(module, dataset, column, field, model, format)).join("")}</tr>`).join("")}</tbody></table>`;
   return `<section class="sec mx-section" id="sec-${id}" data-sec="${id}"><div class="tblock mx-block" id="tb-${id}">
     <h3 class="mm-dataset-title">${esc(dataset.title)}</h3>
     <div class="mx-toolbar">${scopeHTML(module, dataset, reading, selection)}<div class="mm-table-tools">
+        ${detailControls(view, model)}
         <button class="btn-o sm" type="button" data-matrix-transpose data-matrix-module="${module.id}" ${key} aria-pressed="${reading.transposed}">⇄ 转置</button>
         <button class="btn-o sm" type="button" data-fs="${id}">⛶ 全屏</button></div></div>
+    ${detailPanel(view, model, format)}
     ${selection.experiments === 1 ? '<p class="mx-notice" role="status">当前仅查看单个实验数据。</p>' : ""}
     ${columns.length && selection.validExperiments < 2 ? '<p class="mx-notice" role="status">当前指标表有效实验不足两个；保留已有数据，不形成跨实验比较。</p>' : ""}
     ${columns.length ? `<div class="tbl-wrap mx-scroll" tabindex="0" aria-label="${esc(dataset.title)}，可横向和纵向滚动">${table}</div>`

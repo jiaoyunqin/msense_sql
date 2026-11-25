@@ -6,7 +6,10 @@ import { usesMatrix, matrixHTML, applyMatrixEvent, focusMatrixEvidence } from ".
 import { experimentLabel, reportExperimentKey, reportExperimentLabel, repeatedLibraId, selectedCandidateId, findExperimentResult } from "./experiment-identity.js";
 import { buildMultiReportSummary } from "./multi-report-summary.js";
 import { renderReportSummary, reportSummaryText } from "./report-summary.js";
+import { renderConclusionText, generatedConclusionAnnotations } from "./report-conclusion-emphasis.js";
+import { detailTable, detailReading, detailFields, detailRecords, detailFormat, detailControls, detailPanel, detailHeading, detailSortAria, detailValue, detailComparison, detailEvent } from "./report-detail-tools.js";
 
+import { directoryHeading } from "./report-directory-data.js";
 const esc = value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const icon = name => ({ chart: '<path d="M3 3v16h18M7 13l4-5 4 2 5-7"/>', data: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/>',
   info: '<path d="M8 6h12M8 12h12M8 18h12m-16-6 1 1 2-3m-3 8 1 1 2-3"/>' }[name] || "");
@@ -75,41 +78,44 @@ export function reportListRow(report) {
 }
 function conclusionHTML(title, messages, scope) {
   return `<div class="ccard mm-conclusion" data-card="${scope}"><div class="ccard-h"><span class="t">${svg("chart")}${title}</span><span class="grow"></span>${ai(scope)}</div>
-    ${messages.length ? `<ul>${messages.map(message => `<li>${esc(message.text)}</li>`).join("")}</ul>` : '<p class="mm-muted">当前没有可用分析结论。</p>'}</div>`;
+    ${messages.length ? `<div class="cf-prose"><ul>${messages.map(message => `<li>${renderConclusionText(message, generatedConclusionAnnotations(message, scope))}</li>`).join("")}</ul></div>` : '<p class="mm-muted">当前没有可用分析结论。</p>'}</div>`;
 }
-function cellHTML(cell) {
+function cellHTML(cell, model, field, format) {
   const title = cell.reason || (cell.raw != null ? `原值：${cell.raw}${cell.control != null ? `；自身对照组：${cell.control}` : ""}` : cell.text);
-  return `<div class="mm-cell" title="${esc(title)}"><span>${esc(cell.text)}</span>${cell.uplift !== undefined ? `<small>增幅 ${cell.uplift == null ? "—" : `${cell.uplift > 0 ? "+" : ""}${cell.uplift.toFixed(2)}%`}</small>` : ""}
-    ${cell.sig ? `<small class="mm-sig ${cell.sig === "正向显著" ? "positive" : cell.sig === "负向显著" ? "negative" : ""}">${esc(cell.sig)}</small>` : ""}${cell.missing && cell.reason ? `<small class="mm-missing">${esc(cell.reason)}</small>` : ""}</div>`;
+  return `<div class="mm-cell" title="${esc(title)}">${detailValue(cell.text, cell.missing ? null : cell.raw, model, field, format)}${detailComparison(cell, format)}
+    ${cell.missing && cell.reason ? `<small class="mm-missing">${esc(cell.reason)}</small>` : ""}</div>`;
 }
-function datasetHTML(module, experiment, dataset, datasetIndex, view, scopedToExperiment = false) {
+function datasetHTML(module, experiment, dataset, datasetIndex, view, scopedToExperiment = false, reportView = {}) {
   const id = datasetScope(module.index, datasetIndex, scopedToExperiment ? experiment.id : ""), key = `${experiment.id}:${datasetIndex}`;
   const state = view.tables[key] ||= { group: "all", transposed: false };
+  const model = detailTable(module, `${module.id}-single-${module.experiments.indexOf(experiment)}-${datasetIndex}`, dataset);
+  const order = detailReading(reportView, model), format = detailFormat(reportView, model), fields = detailFields(model, order);
   const groups = [...new Map(dataset.records.map(record => [record.groupId, record.groupName])).entries()];
-  const rows = dataset.records.filter(record => state.group === "all" || record.groupId === state.group);
+  const rows = detailRecords(model, order, dataset.records.filter(record => state.group === "all" || record.groupId === state.group));
   const table = state.transposed
-    ? `<table class="mm-table"><thead><tr><th class="mm-fixed">字段 / 数据</th>${rows.map(row => `<th>${esc(row.label)}${dataset.mode === "demo-spend" ? `<small>${esc(row.groupName)}</small>` : ""}</th>`).join("")}</tr></thead><tbody>${dataset.fields.map((field, index) =>
-      `<tr data-bid="${field.key}"><th class="mm-fixed" scope="row" title="${esc(field.formulaText || field.description || "")}">${esc(field.name)}${field.unit ? `<small>${field.unit}</small>` : ""}</th>${rows.map(row => `<td>${cellHTML(row.cells[index])}</td>`).join("")}</tr>`).join("")}</tbody></table>`
-    : `<table class="mm-table"><thead><tr><th class="mm-fixed">${dataset.firstColumn}</th>${dataset.fields.map(field => `<th title="${esc(field.formulaText || field.description || "")}">${esc(field.name)}${field.unit ? `<small>${field.unit}</small>` : ""}</th>`).join("")}</tr></thead><tbody>${rows.map(row =>
-      `<tr data-bid="${row.id}"><th class="mm-fixed" scope="row">${esc(row.label)}${dataset.dimensioned || dataset.mode === "demo-spend" ? `<small>${esc(row.groupName)}</small>` : row.control ? '<small class="mm-control">对照组</small>' : ""}</th>${row.cells.map(cell => `<td>${cellHTML(cell)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+    ? `<table class="mm-table" data-cf-trend-palette="${format.trendPalette}"><thead><tr><th class="mm-fixed">字段 / 数据</th>${rows.map(row => `<th>${esc(row.label)}${dataset.mode === "demo-spend" ? `<small>${esc(row.groupName)}</small>` : ""}</th>`).join("")}</tr></thead><tbody>${fields.map(field =>
+      `<tr data-bid="${field.key}"><th class="mm-fixed" scope="row"${detailSortAria(field, order)} title="${esc(field.formulaText || field.description || "")}">${detailHeading(model, field, order)}</th>${rows.map(row => `<td>${cellHTML(row.cells[dataset.fields.indexOf(field)], model, field, format)}</td>`).join("")}</tr>`).join("")}</tbody></table>`
+    : `<table class="mm-table" data-cf-trend-palette="${format.trendPalette}"><thead><tr><th class="mm-fixed">${dataset.firstColumn}</th>${fields.map(field => `<th${detailSortAria(field, order)} title="${esc(field.formulaText || field.description || "")}">${detailHeading(model, field, order)}</th>`).join("")}</tr></thead><tbody>${rows.map(row =>
+      `<tr data-bid="${row.id}"><th class="mm-fixed" scope="row">${esc(row.label)}${dataset.dimensioned || dataset.mode === "demo-spend" ? `<small>${esc(row.groupName)}</small>` : row.control ? '<small class="mm-control">对照组</small>' : ""}</th>${fields.map(field => `<td>${cellHTML(row.cells[dataset.fields.indexOf(field)], model, field, format)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
   return `<section class="sec mm-dataset tblock" id="sec-${id}" data-sec="${id}" aria-label="${esc(dataset.title)}" data-dataset-index="${datasetIndex}">
     <div class="tblock" id="tb-${id}"><h3 class="mm-dataset-title">${esc(dataset.title)}</h3>
       <div class="mm-table-toolbar"><div class="mm-group-tabs" role="tablist" aria-label="${esc(dataset.title)}实验组">
         ${[["all", "全部"], ...groups].map(([groupId, name]) => `<button type="button" role="tab" aria-selected="${state.group === groupId}" class="${state.group === groupId ? "on" : ""}" data-mm-group="${esc(groupId)}" data-mm-module="${module.id}" data-mm-experiment="${experiment.id}" data-mm-table="${datasetIndex}">${esc(name)}</button>`).join("")}
-      </div><div class="mm-table-tools"><small>${rows.length} 条数据</small><button class="btn-o sm" type="button" data-mm-transpose data-mm-module="${module.id}" data-mm-experiment="${experiment.id}" data-mm-table="${datasetIndex}" aria-pressed="${state.transposed}">⇄ 转置</button><button class="btn-o sm" type="button" data-fs="${id}">⛶ 全屏</button></div></div>
+      </div><div class="mm-table-tools"><small>${rows.length} 条数据</small>${detailControls(reportView, model)}<button class="btn-o sm" type="button" data-mm-transpose data-mm-module="${module.id}" data-mm-experiment="${experiment.id}" data-mm-table="${datasetIndex}" aria-pressed="${state.transposed}">⇄ 转置</button><button class="btn-o sm" type="button" data-fs="${id}">⛶ 全屏</button></div></div>
+      ${detailPanel(reportView, model, format)}
       <div class="tbl-wrap mm-table-scroll" tabindex="0" aria-label="${esc(dataset.title)}，可横向滚动">${table}</div>
       ${dataset.calculated ? `<details class="mm-notes"><summary>计算公式与输入来源</summary><ul>${dataset.fields.map(field =>
         `<li>${esc(field.name)}：${esc(field.formulaText)}；${field.sources.map(source => `${esc(source.sourceName)} v${source.ref.version}`).join("、")}</li>`).join("")}</ul></details>` : ""}
       <p class="mm-source">${esc(dataset.sourceName)} · ${dataset.calculated && !dataset.sourceVersion ? "模块草稿快照" : `v${dataset.sourceVersion || 1}`} · ${esc(experimentLabel(experiment))}${dataset.evidencePeriod ? ` · 实验前 ${dataset.evidencePeriod.join(" 至 ")}` : ""}</p></div></section>`;
 }
-function experimentHTML(report, module, experiment, state, scopedToExperiment = false) {
+function experimentHTML(report, module, experiment, state, scopedToExperiment = false, view = {}) {
   const singleId = singleScope(module.index, experiment.id);
   const showConclusion = module.analysisType === "single";
   return `<div class="mm-experiment-content" id="sec-${singleId}" data-sec="${singleId}" data-selected-experiment="${experiment.id}">
     <div class="mm-experiment-meta"><span>${esc(experimentLabel(experiment))}</span><span>观察窗口 ${experiment.input.start} 至 ${experiment.input.end}</span><span>对照组：${esc(experiment.definition.control.name)}</span></div>
     ${experiment.status === "success" ? `${showConclusion ? conclusionHTML("单实验分析结论", experiment.conclusions, singleId) : ""}
       <div class="mm-data-heading">${svg("data")}<strong>数据明细</strong><span>${experiment.datasets.length} 个数据集</span></div>
-      ${experiment.datasets.map((dataset, datasetIndex) => datasetHTML(module, experiment, dataset, datasetIndex, state, scopedToExperiment)).join("")}`
+      ${experiment.datasets.map((dataset, datasetIndex) => datasetHTML(module, experiment, dataset, datasetIndex, state, scopedToExperiment, view)).join("")}`
       : `<div class="mm-unavailable" role="status"><strong>该实验暂不可查看</strong><p>${esc(experiment.error || "分析尚未完成")}</p>${experiment.gaps.map(gap => `<p>${esc(gap)}</p>`).join("")}<p>可切换查看其他实验的${showConclusion ? "数据与结论" : "数据"}。</p>${report.taskId ? `<a href="#/experiments/task/${report.taskId}">返回任务处理</a>` : ""}</div>`}
     </div>`;
 }
@@ -133,10 +139,11 @@ function reportExperimentHeader(report) {
   }).join("")}</div>`;
 }
 export function renderMultiReport(report, view) {
+  view.reportId = report.id;
   const modules = reportModules(report), failed = report.results.filter(result => result.status !== "success");
   const multi = report.snapshot.analysisType === "multi";
   const summary = report.summary || (multi ? buildMultiReportSummary(report, modules) : null);
-  return `<header class="rhead mm-report-header"><p class="eyebrow">实验分析报告 <span class="ma-demo-tag">分析类型：${esc(analysisTypes[report.snapshot.analysisType])}</span></p><h1>${esc(report.title)}</h1>
+  return `<div class="cf-report mm-updated-report"><header class="rhead mm-report-header"><p class="eyebrow">实验分析报告 <span class="ma-demo-tag">分析类型：${esc(analysisTypes[report.snapshot.analysisType])}</span></p><h1>${esc(report.title)}</h1>
     ${multi ? `<div class="mm-report-context">${report.meta.filter(([label]) => label !== "分析类型").map(([label, value]) => `<span>${esc(label)}：${esc(value)}</span>`).join("")}</div>`
       : `<dl class="meta">${report.meta.map(([label, value]) => `<div><dt>${label}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl>`}
     <p class="mm-report-sub">生成时间：${new Date(report.createdAt).toLocaleString("zh-CN", { hour12: false })} · ${modules.length} 个分析模块${report.private ? " · 模块私有试跑" : ""}</p>
@@ -146,19 +153,19 @@ export function renderMultiReport(report, view) {
       return esc(`${entry ? reportExperimentLabel(report.snapshot, entry) : result.id} ${result.error || "数据未完成"}`);
     }).join("；")}${report.taskId ? ` <a href="#/experiments/task/${report.taskId}">返回任务</a>` : ""}</div>` : ""}
     ${report.snapshot.supplement ? `<details class="mm-supplement"><summary>用户补充信息</summary><p>${esc(report.snapshot.supplement)}</p></details>` : ""}</header>
-    ${renderReportSummary(summary)}
+    ${renderReportSummary(summary, { emphasis: true })}
     ${modules.map(module => {
       const state = moduleView(view, module), experiment = module.experiments.find(experiment => experiment.id === state.experimentId) || module.experiments[0];
       const cross = report.snapshot.analysisType === "multi" && module.analysisType === "multi";
       const matrix = usesMatrix(report, module);
       const detail = () => `${experimentSelectorHTML(module, experiment)}
-        ${experimentHTML(report, module, experiment, state, singleExperimentModule(report, module))}`;
-      return `<section class="sec mm-module" id="sec-${module.id}" data-sec="${module.id}" data-mm-section="${module.id}" data-module-analysis-type="${module.analysisType}">
+        ${experimentHTML(report, module, experiment, state, singleExperimentModule(report, module), view)}`;
+      return `${directoryHeading(report, module.id, esc)}<section class="sec mm-module" id="sec-${module.id}" data-sec="${module.id}" data-mm-section="${module.id}" data-module-analysis-type="${module.analysisType}">
         <header class="mm-module-heading"><h2>${esc(module.title)}</h2><p>${esc(module.description)}</p></header>
         ${cross ? conclusionHTML("多实验分析结论", module.conclusions, module.id) : ""}
         ${matrix ? `<div class="mm-data-heading">${svg("data")}<strong>数据明细</strong></div>
-          ${matrixHTML(module, state)}` : detail()}</section>`;
-    }).join("")}`;
+          ${matrixHTML(module, state, view)}` : detail()}</section>`;
+    }).join("")}</div>`;
 }
 function scopeContext(report, scope, view) {
   const modules = reportModules(report);
@@ -227,6 +234,13 @@ export function multiAnswer(report, question, scope = "all", view = {}) {
 }
 export function applyModuleReportEvent(event, report, view) {
   const modules = reportModules(report);
+  view.reportId = report.id;
+  const models = modules.flatMap(module => usesMatrix(report, module)
+    ? matrixTables(module.comparison).map(dataset => detailTable(module, matrixTableScope(module, dataset), dataset, true))
+    : module.experiments.flatMap((experiment, experimentIndex) => experiment.datasets.map((dataset, index) =>
+      detailTable(module, `${module.id}-single-${experimentIndex}-${index}`, dataset))));
+  const detailChange = detailEvent(event, view, models);
+  if (detailChange) return detailChange;
   const matrixChange = applyMatrixEvent(event, { ...report, moduleContent: modules }, view);
   if (matrixChange) return matrixChange;
   const target = event.target.closest("[data-mm-select],[data-mm-group],[data-mm-transpose]");

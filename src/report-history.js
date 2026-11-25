@@ -1,6 +1,9 @@
 import { createReportContent } from "./report-demo-content.js";
 import { createReportDateFilter, matchesReportFilters, normalizeReportStatus, normalizeReportType, reportStatusOptions, reportTypeOptions } from "./report-filters.js";
 import "./report-history.css";
+import { reportDirectoryItems, normalizeDirectory, updateDirectory, removeDirectoryGroup } from "./report-directory-data.js";
+import { directoryEditorHTML, reportDirectoryDialogHTML, reportDirectoryHeaderHTML, directoryNameEvent, beginDirectoryRename, syncDirectoryNames, commitDirectoryNames } from "./report-directory-ui.js";
+import { directoryReorderEvent } from "./report-directory-drag.js";
 
 const STORAGE_KEY = "msense-report-followups-v1";
 const MODEL_OPTIONS = [
@@ -33,6 +36,7 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
   const $ = selector => root.querySelector(selector);
   const $$ = selector => [...root.querySelectorAll(selector)];
   let report, popup, popupAnchor, fullscreenAnchor;
+  let directoryDraft;
   let reportContextTokens = 0;
   let modelMenuOpen = false;
   let reasoningMenuOpen = false;
@@ -159,6 +163,7 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
   function render(page, id) {
     if (page === "report" && report?.id === id && !root.hidden) return;
     cancelTasks();
+    directoryDraft = undefined;
     dateFilter.close();
     closePopup();
     modelMenuOpen = false;
@@ -217,11 +222,15 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
       : `<div class="r-empty">${ic("search", 24)}<p>没有符合条件的报告</p><button class="btn-o" data-r-reset>重置筛选</button></div>`;
   }
 
+  function reportTocHTML() {
+    return content.tocHTML(report, reportDirectoryHeaderHTML(Boolean(extensions()?.canEdit?.(report))));
+  }
+
   function renderReport() {
     const summary = report.summary;
     const customBody = extensions()?.renderBody?.(report);
     root.innerHTML = `<div class="r-reading"><div class="r-report-toolbar"><a href="#/history">${ic("back")}过往分析报告</a><span>${esc(normalizeReportType(report.kind))}</span></div>
-      <div id="view" tabindex="-1"><div class="rlayout">${content.tocHTML(report)}
+      <div id="view" tabindex="-1"><div class="rlayout">${reportTocHTML()}
       <article class="report" id="report" aria-label="分析报告正文">${customBody ?? `<header class="rhead"><p class="eyebrow">实验分析报告</p><h1>${esc(report.title)}</h1>
       <dl class="meta">${report.meta.map(([label, value]) => `<div><dt>${esc(label)}</dt><dd title="${esc(value)}">${esc(value)}</dd></div>`).join("")}</dl></header>
       ${summary ? `<section class="sec" id="sec-${summary.id}" data-sec="${summary.id}"><div class="ccard" data-card="${summary.id}"><div class="ccard-h"><span class="t">${ic("chart")}${esc(summary.title)}</span><span class="grow"></span>${askBtn(summary.id)}</div>
@@ -254,7 +263,7 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
       const top = $("#view").scrollTop;
       const focused = document.activeElement;
       const selection = focused?.matches("[data-matrix-search]") ? [focused.selectionStart, focused.selectionEnd] : null;
-      const scrolls = [...current.querySelectorAll(".mx-scroll")].map(element => [element.scrollLeft, element.scrollTop]);
+      const scrolls = [...current.querySelectorAll(".mx-scroll,.tbl-wrap")].map(element => [element.scrollLeft, element.scrollTop]);
       const fullscreenId = current.querySelector(".tblock.fs")?.id;
       const expandedNotes = [...current.querySelectorAll("details")].map(details => details.open);
       const matrixDetails = new Map([...current.querySelectorAll("[data-matrix-details]")].map(details => [details.dataset.matrixDetails, details.open]));
@@ -268,7 +277,7 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
       replacement.querySelectorAll("details").forEach((details, index) => {
         details.open = details.dataset.matrixDetails ? matrixDetails.get(details.dataset.matrixDetails) || false : expandedNotes[index] || false;
       });
-      replacement.querySelectorAll(".mx-scroll").forEach((element, index) => {
+      replacement.querySelectorAll(".mx-scroll,.tbl-wrap").forEach((element, index) => {
         if (scrolls[index]) [element.scrollLeft, element.scrollTop] = scrolls[index];
       });
       $("#view").scrollTop = top;
@@ -281,7 +290,7 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
     if (change?.focus) $(change.focus)?.focus({ preventScroll: true });
     if (change?.scroll) {
       const target = (change.focus && $(change.focus)) || (change.scope && $(`#sec-${CSS.escape(change.scope)}`));
-      target?.scrollIntoView({ block: "center", inline: "nearest", behavior: "auto" });
+      scrollInReport(target, "center", "auto");
     }
     syncToc();
   }
@@ -457,14 +466,16 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
     textarea.style.height = Math.min(140, textarea.scrollHeight) + "px";
   }
 
-  function gotoSection(scope, block) {
+  function gotoSection(scope, block, groupId) {
     const change = extensions()?.beforeGoto?.(report, scope);
     if (change) { scope = change.scope || scope; refreshBody(change); }
     const section = $(`#sec-${scope}`);
-    const target = change?.focus ? $(change.focus) || section : block ? section?.querySelector(`[data-bid="${block}"]`) || section : section;
+    const target = groupId ? $(`[data-rd-body-group="${CSS.escape(groupId)}"]`) || section
+      : change?.focus ? $(change.focus) || section : block ? section?.querySelector(`[data-bid="${block}"]`) || section : section;
     if (!target) return;
     if (narrow()) setExpanded(false);
-    target.scrollIntoView({ block: block ? "center" : "start", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    scrollInReport(target, block || change?.focus ? "center" : "start",
+      matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth");
     const card = target.closest(".ccard") || target;
     target.classList.add("hl-quote"); card.classList.add("flash");
     window.setTimeout(() => { target.classList.remove("hl-quote"); card.classList.remove("flash"); }, 2000);
@@ -473,12 +484,138 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
   function syncToc() {
     const sections = $$(".sec").filter(section => !section.hidden);
     let current = sections[0]?.dataset.sec;
-    sections.forEach(el => { if (el.getBoundingClientRect().top < 180) current = el.dataset.sec; });
+    const threshold = ($("#view")?.getBoundingClientRect().top || 0) + 40;
+    sections.forEach(el => { if (el.getBoundingClientRect().top < threshold) current = el.dataset.sec; });
     $$(".toc-item").forEach(el => {
       el.classList.toggle("active", el.dataset.goto === current);
-      if (el.dataset.goto === current) el.setAttribute("aria-current", "location"); else el.removeAttribute("aria-current");
+      if (el.dataset.goto === current && !el.dataset.directoryGroup) el.setAttribute("aria-current", "location"); else el.removeAttribute("aria-current");
     });
   }
+
+  function scrollInReport(target, block, behavior) {
+    if (!target) return;
+    // Stop at the report viewport. Scrolling the page shell hides section headings.
+    const viewport = $("#view"), fullscreen = target.closest(".tblock.fs");
+    for (let parent = target.parentElement; parent; parent = parent.parentElement) {
+      const scrollY = parent === viewport || (parent.scrollHeight > parent.clientHeight && /auto|scroll/.test(getComputedStyle(parent).overflowY));
+      const scrollX = parent.scrollWidth > parent.clientWidth && /auto|scroll/.test(getComputedStyle(parent).overflowX);
+      if (scrollY || scrollX) {
+        const rect = target.getBoundingClientRect(), bounds = parent.getBoundingClientRect();
+        const top = scrollY ? parent.scrollTop + (block === "center"
+          ? rect.top - bounds.top - (parent.clientHeight - Math.min(rect.height, parent.clientHeight)) / 2
+          : rect.top - bounds.top - 16) : parent.scrollTop;
+        let left = parent.scrollLeft;
+        if (scrollX && rect.left < bounds.left) left += rect.left - bounds.left;
+        else if (scrollX && rect.right > bounds.right) left += rect.right - bounds.right;
+        parent.scrollTo({ top: Math.max(0, top), left: Math.max(0, left), behavior });
+      }
+      if (parent === viewport || parent === fullscreen) break;
+    }
+  }
+
+  function closeDirectoryEditor() {
+    $("[data-rd-modal]")?.remove(); directoryDraft = undefined;
+    $(".toc [data-rd-open]")?.focus({ preventScroll: true });
+  }
+
+  function renderDirectoryEditor(errors = []) {
+    const old = $(".rd-dialog-body"), scrollTop = old?.scrollTop || 0;
+    $("[data-rd-modal]")?.remove();
+    root.insertAdjacentHTML("beforeend", reportDirectoryDialogHTML(directoryDraft, reportDirectoryItems(report), errors, Boolean(report.summary)));
+    $(".rd-dialog-body").scrollTop = scrollTop;
+  }
+
+  function directoryFieldChanged(event) {
+    if (!directoryDraft || !event.target.closest("[data-rd-modal]")) return false;
+    const field = event.target;
+    if (field.hasAttribute("data-rd-report-title")) directoryDraft.reportTitle = field.value;
+    else if (field.dataset.rdField) {
+      if (event.type !== "rd-rename") return true;
+      updateDirectory(directoryDraft.directory, field.dataset.rdField, field.dataset.rdId, field.value);
+      const fragment = document.createElement("div");
+      fragment.innerHTML = directoryEditorHTML(directoryDraft.directory, reportDirectoryItems(report), "report", Boolean(report.summary));
+      $(".rd-preview").replaceWith(fragment.querySelector(".rd-preview"));
+      syncDirectoryNames($(".rd-dialog"), directoryDraft.directory, reportDirectoryItems(report));
+    }
+    return true;
+  }
+
+  function directoryClicked(event) {
+    if (directoryNameEvent(event)) return true;
+    const trigger = event.target.closest("[data-rd-open],[data-rd-close],[data-rd-save],[data-rd-action]");
+    if (!trigger) return false;
+    if (trigger.hasAttribute("data-rd-open")) {
+      if (!extensions()?.canEdit?.(report)) return true;
+      closePopup();
+      directoryDraft = { reportTitle: report.title,
+        directory: normalizeDirectory(report.presentationDirectory, reportDirectoryItems(report)) };
+      renderDirectoryEditor();
+      (trigger.dataset.rdOpen === "title" ? $("[data-rd-report-title]") : $(".rd-dialog [data-rd-rename]") || $(".rd-dialog"))?.focus({ preventScroll: true });
+    } else if (trigger.hasAttribute("data-rd-close")) closeDirectoryEditor();
+    else if (trigger.hasAttribute("data-rd-save") && directoryDraft) {
+      if (!commitDirectoryNames($(".rd-dialog"))) return true;
+      try {
+        extensions().savePresentation(report, directoryDraft);
+        const top = $("#view").scrollTop;
+        closeFullscreen(); closeDirectoryEditor();
+        report = extensions().getReport(report.id); content.state.report = report;
+        refreshBody();
+        $(".toc").outerHTML = reportTocHTML();
+        $(".ai-ctx b").textContent = report.title; $(".ai-ctx b").title = report.title;
+        $("#view").scrollTop = top; syncToc();
+        $(".toc [data-rd-open]")?.focus({ preventScroll: true });
+        showToast("报告目录与标题已保存");
+      } catch (error) { renderDirectoryEditor(error.message.split("\n")); $(".rd-errors")?.focus?.(); }
+    } else if (directoryDraft) {
+      if (!commitDirectoryNames($(".rd-dialog"))) return true;
+      const { rdAction: action, rdId: id } = trigger.dataset;
+      let addedId;
+      if (action === "add-group") {
+        addedId = `group-${crypto.randomUUID()}`;
+        directoryDraft.directory.groups.push({ id: addedId, title: `分组 ${directoryDraft.directory.groups.length + 1}` });
+      }
+      else if (action === "remove-group") removeDirectoryGroup(directoryDraft.directory, id);
+      else return true;
+      renderDirectoryEditor();
+      if (addedId) beginDirectoryRename($(`[data-rd-group="${addedId}"] .rd-name`));
+      else ($(`[data-rd-action="${action}"][data-rd-id="${id}"]:not(:disabled)`) || $('[data-rd-action="add-group"]'))?.focus({ preventScroll: true });
+    }
+    return true;
+  }
+
+  function reorderReportDirectory(event) {
+    if (!directoryDraft) return false;
+    const change = directoryReorderEvent(event, root, directoryDraft.directory);
+    if (!change) return false;
+    if (change.changed) {
+      renderDirectoryEditor();
+      $(change.focus)?.focus({ preventScroll: true });
+    }
+    return true;
+  }
+
+  root.addEventListener("rd-rename", directoryFieldChanged);
+  root.addEventListener("keydown", event => {
+    if (directoryNameEvent(event)) return;
+    if (reorderReportDirectory(event)) return;
+    const change = extensions()?.handleEvent?.(event, report);
+    if (change) { refreshBody(change); return; }
+    if (!directoryDraft) return;
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeDirectoryEditor(); }
+    else if (event.key === "Tab") {
+      const elements = [...$(".rd-dialog").querySelectorAll("button:not(:disabled),input,select")]
+        .filter(element => !element.closest("[hidden]") && !(element.matches("[data-rd-rename]") && element.closest(".is-editing")));
+      const first = elements[0], last = elements.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+  });
+
+  for (const type of ["dragstart", "dragenter", "dragover", "dragleave", "drop", "dragend"]) root.addEventListener(type, event => {
+    if (reorderReportDirectory(event)) return;
+    const change = extensions()?.handleEvent?.(event, report);
+    if (change) refreshBody(change);
+  });
 
   function closeFullscreen() {
     $(".tblock.fs")?.classList.remove("fs"); $(".fs-mask")?.remove();
@@ -495,6 +632,7 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
   }
 
   root.addEventListener("input", e => {
+    if (directoryFieldChanged(e)) return;
     const change = extensions()?.handleEvent?.(e, report);
     if (change) { refreshBody(change); return; }
     if (e.target.id === "report-search") { filters.kw = e.target.value; renderCards(); }
@@ -510,6 +648,7 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
     if (change) refreshBody(change);
   });
   root.addEventListener("change", e => {
+    if (directoryFieldChanged(e)) return;
     const change = extensions()?.handleEvent?.(e, report);
     if (change) { refreshBody(change); return; }
     if (e.target.dataset.rFilter) { filters[e.target.dataset.rFilter] = e.target.value; renderCards(); }
@@ -520,6 +659,7 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
     if (e.target.matches(".pop-in")) askFromPopup(e.target.querySelector("input")?.value);
   });
   root.addEventListener("click", e => {
+    if (directoryClicked(e)) return;
     const change = extensions()?.handleEvent?.(e, report);
     if (change) { refreshBody(change); return; }
     const button = e.target.closest("button");
@@ -568,7 +708,7 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
     if ("closePopup" in d) closePopup(true);
     if (d.pq) askFromPopup(d.pq);
     if (d.q) send(d.q, d.qScope);
-    if (d.goto) gotoSection(d.goto);
+    if (d.goto) gotoSection(d.goto, undefined, d.directoryGroup);
     if (d.cite) { const [scope, block] = d.cite.split(":"); gotoSection(scope, block); }
     if (d.tab) {
       const [scope, tab] = d.tab.split(":"); content.state.tabs[scope] = tab;

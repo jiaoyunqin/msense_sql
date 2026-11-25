@@ -2,6 +2,7 @@ import { computeModuleCalculations, comparisonCalculationRecords } from "./analy
 import { validateCalculatedMetrics } from "./analysis-module-calculations.js";
 import { createPreAAEvidence } from "./pre-aa-demo.js";
 import { experimentPairKey, selectedCandidateId, findExperimentResult } from "./experiment-identity.js";
+import { sectionIdentity, normalizeDirectory, directoryIssues } from "./report-directory-data.js";
 // Local, fictional fixtures. All report surfaces derive from the same task snapshot.
 export const copy = value => structuredClone(value);
 export const multiId = prefix => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -136,9 +137,11 @@ export function newTemplate(type = "single") {
     sections: [], versions: [], enabled: true, updatedAt: "", createdBy: "sheriqin.01" };
 }
 export function templateConfiguration(template) {
+  const sections = template.sections.map((section, index) => ({ ...section, id: sectionIdentity(section, index) }));
   return copy({ name: template.name, description: template.description, analysisType: template.analysisType,
     goal: template.goal, apps: template.apps || [], reasoning: template.reasoning || "",
-    considerations: template.considerations || "", sections: template.sections });
+    considerations: template.considerations || "", sections,
+    directory: normalizeDirectory(template.directory, sections.map(section => ({ id: section.id, title: section.title }))) });
 }
 export const templateChanged = template => !template.versions.length || JSON.stringify(templateConfiguration(template))
   !== JSON.stringify(templateConfiguration(template.versions.at(-1).configuration));
@@ -162,8 +165,6 @@ export function templateIssues(store, template) {
   for (const section of template.sections) {
     const module = store.modules.find(module => module.id === section.moduleId);
     const version = module?.versions.find(version => version.number === section.version);
-    if (!section.title.trim()) errors.push("请填写报告章节名称。");
-    if (!["overall", "strategy", "detail"].includes(section.kind)) errors.push("请选择章节内容。");
     if (!module || module.archived || module.enabled === false || !version)
       errors.push(`${section.title || "章节"}：模块未发布、已下线或固定版本不可用。`);
     else if (!templateModuleCompatible(template.analysisType, version.configuration.analysisType || "single"))
@@ -174,6 +175,9 @@ export function templateIssues(store, template) {
   }
   if (template.analysisType === "multi" && !hasMultiModule)
     errors.push("多实验报告至少包含一个负责跨实验结论的多实验分析模块。");
+  errors.push(...directoryIssues(template.directory, template.sections.map((section, index) => ({
+    id: sectionIdentity(section, index), title: section.title
+  }))));
   return [...new Set(errors)];
 }
 export function publishTemplate(store, template) {
@@ -358,6 +362,7 @@ export function createAnalysisTask(store, draft, { trialModule = null } = {}) {
     return { id: module.id, version: section.version, configuration: fixed };
   });
   const task = { id: multiId("ma-task"), status: "running", startedAt: new Date().toISOString(),
+    createdBy: "sheriqin.01",
     private: Boolean(trialModule), moduleId: trialModule?.id || "", scenario: draft.scenario || "normal",
     snapshot: copy({ analysisType: draft.analysisType, goal: draft.goal, supplement: draft.supplement,
       origin: trialModule ? "trial" : selectedModules.length ? "modules" : "template",
@@ -444,6 +449,7 @@ export function createTaskReport(store, task) {
   if (successCount < (task.snapshot.analysisType === "multi" ? 2 : 1)) return null;
   // A retry produces a new report snapshot; earlier partial reports remain immutable.
   const report = { id: multiId("ma-report"), taskId: task.id, createdAt: new Date().toISOString(),
+    createdBy: task.createdBy, editorIds: copy(task.editorIds || []),
     private: task.private, snapshot: copy(task.snapshot), results: copy(task.results), status: task.status };
   store.multiAnalysis.reports.unshift(report); task.reportId = report.id;
   if (task.private) {

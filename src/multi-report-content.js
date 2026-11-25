@@ -217,7 +217,7 @@ export function buildReportModules(report) {
     });
     const analysisType = module.configuration.analysisType || "single";
     return { index, id: moduleScope(index), moduleId: module.id, version: module.version, analysisType,
-      title: module.configuration.name || chapter.title, chapterTitle: chapter.title,
+      title: chapter.title || module.configuration.name, chapterTitle: chapter.title,
       description: module.configuration.description || "", configuration: module.configuration,
       experiments, conclusions: analysisType === "multi" ? summarizeAcross(module, experiments, index) : [],
       boundaries: comparisonBoundaries(report.snapshot, report.results),
@@ -266,7 +266,7 @@ export function demoModuleReport() {
       comparisonCalculationRecords(modules[0].configuration, result, { input, definition }));
     return result;
   });
-  return { id: "r-multi-modules", createdAt: "2026-11-08T09:00:00+08:00", taskId: "", private: false, status: "success",
+  return { id: "r-multi-modules", createdBy: "sheriqin.01", createdAt: "2026-11-08T09:00:00+08:00", taskId: "", private: false, status: "success",
     snapshot: { analysisType: "multi", goal: "平台老客提频", templateId: "demo-module-report", templateVersion: 1,
       template: { name: "老客提频 · 多实验分析报告", description: "逐模块查看多实验分析结论与数据明细。",
         sections: modules.map((module, i) => ({ moduleId: module.id, version: 1, title: module.configuration.name, kind: i ? "detail" : "overall" })) },

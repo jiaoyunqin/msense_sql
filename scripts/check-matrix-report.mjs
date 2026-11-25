@@ -628,7 +628,9 @@ check("显示范围默认全选；搜索不清除隐藏选择；清空、单实�
   assert.equal(reading.selected.length, 0);
   html = renderMultiReport(report, view);
   assert(html.includes("当前无可见数据"));
-  assert(!html.includes(">4.73</span>"));
+  // Conclusions retain their evidence even when the table selection is empty.
+  const matrix = html.slice(html.indexOf(`id="sec-${module.id}-matrix"`));
+  assert(!matrix.includes('class="mx-cell"'));
   matrixEvent(report, view, module, { matrixGroup: dataset.columns[2].key }, "", "change", true);
   assert(renderMultiReport(report, view).includes("当前仅查看单个实验数据"));
   matrixEvent(report, view, module, { matrixReset: "" });

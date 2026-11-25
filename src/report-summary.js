@@ -1,5 +1,13 @@
+import { renderConclusionText, generatedConclusionAnnotations } from "./report-conclusion-emphasis.js";
+
 const esc = value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const prose = value => esc(value).replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+const summaryRuns = runs => runs.map(run => {
+  if (run.note) return `<em class="sv-parenthetical">${esc(run.text)}${run.value ? `<span class="sv-number">${esc(run.value)}</span>${esc(run.suffix || "")}` : ""}</em>`;
+  if (["positive", "negative", "neutral"].includes(run.tone)) return `<strong class="sv-highlight sv-highlight-${run.tone}" data-sv-evidence="${esc(run.evidence)}">${run.text ? esc(run.text) : ""}<span class="sv-number">${esc(run.value)}</span></strong>`;
+  if (run.value) return `<span class="sv-number">${esc(run.value)}</span>`;
+  return esc(run.text);
+}).join("");
 const chart = `<svg class="ic summary-chart" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
   <path d="M12 16v5M16 14.639V21M20 10.656V21m2-18-8.646 8.646a.5.5 0 0 1-.708 0L9.354 8.354a.5.5 0 0 0-.707 0L2 15M4 18.463V21M8 14.656V21"/></svg>`;
 const aiMark = id => `<svg class="summary-ai-mark" width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
@@ -7,15 +15,22 @@ const aiMark = id => `<svg class="summary-ai-mark" width="18" height="18" viewBo
   <path d="M3 15V5l6 8 6-8v10" stroke="url(#${id}-ai-mark)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M15 3V1.5" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>`;
 
-export function renderReportSummary(summary) {
+export function renderReportSummary(summary, options = {}) {
   if (!summary) return "";
   const id = esc(summary.id), title = esc(summary.title);
+  const textHTML = text => {
+    if (!options.emphasis) return prose(text);
+    const runs = String(text ?? "").split(/(\*\*[^*\n]+\*\*)/g).filter(Boolean)
+      .map(part => part.startsWith("**") ? { text: part.slice(2, -2), strong: true } : { text: part });
+    const item = { text: runs.map(run => run.text).join(""), runs };
+    return renderConclusionText(item, generatedConclusionAnnotations(item, summary.id));
+  };
   const blocks = (summary.blocks || []).map(block =>
-    `${block.h ? `<h4>${prose(block.h)}</h4>` : ""}${block.list?.length ? `<ul>${block.list.map(text => `<li><p>${prose(text)}</p></li>`).join("")}</ul>` : ""}${block.text ? `<p>${prose(block.text)}</p>` : ""}`
+    `${block.h ? `<h4>${prose(block.h)}</h4>` : ""}${block.list?.length ? `<ul>${block.list.map(text => `<li><p>${textHTML(text)}</p></li>`).join("")}</ul>` : ""}${block.text ? `<p>${block.runs ? summaryRuns(block.runs) : textHTML(block.text)}</p>` : ""}`
   ).join("");
   return `<section class="sec reference-summary" id="sec-${id}" data-sec="${id}"><div class="ccard" data-card="${id}">
     <div class="ccard-h"><h3 class="t">${chart}<span>${title}</span></h3><span class="grow"></span><button type="button" class="ask-btn mm-ai" data-ask="${id}" aria-label="向 AI 提问：${title}">${aiMark(id)}<span>AI</span></button></div>
-    <div class="report-summary-body" data-summary-body>${summary.lead ? `<p class="summary-lead"><strong>${prose(summary.lead)}</strong></p>` : ""}${blocks}</div></div></section>`;
+    <div class="report-summary-body" data-summary-body>${summary.lead ? `<p class="summary-lead"><strong>${textHTML(summary.lead)}</strong></p>` : ""}${blocks}</div></div></section>`;
 }
 
 export function reportSummaryText(summary) {

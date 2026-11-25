@@ -6,7 +6,7 @@ import { renderReportSummary, reportSummaryText } from "../src/report-summary.js
 let checks = 0;
 const check = (label, fn) => { fn(); checks++; console.log(`✓ ${label}`); };
 const text = report => reportSummaryText(report.summary);
-const summaryHTML = report => renderReportSummary(report.summary);
+const summaryHTML = report => renderReportSummary(report.summary, { emphasis: true });
 function freeze(value) {
   if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
   Object.values(value).forEach(freeze);

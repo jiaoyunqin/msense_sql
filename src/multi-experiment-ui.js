@@ -5,14 +5,22 @@ import {
   initializeMultiAnalysis, workbenchModuleOptions, workbenchIssues, createAnalysisTask, executeAnalysisTask, createTaskReport
 } from "./multi-experiment-data.js";
 import { reportDescriptor, reportListRow, renderMultiReport, multiSuggestions, multiAnswer, applyModuleReportEvent, prepareModuleCitation } from "./multi-experiment-report.js";
-import { demoModuleReport, demoMixedModuleReport, demoMatrixModuleReport, moduleView, singleScope } from "./multi-report-content.js";
+import { demoModuleReport, moduleView, singleScope } from "./multi-report-content.js";
 import { referenceDescriptor, referenceListRow, renderReferenceReport, referenceEvent, referenceAnswer } from "./report-reference.js";
+import { showcaseDescriptor, showcaseListRow, renderShowcaseReport, showcaseEvent, showcaseBeforeGoto, showcaseSuggestions, showcaseAnswer } from "./report-showcase.js";
+import { completeDescriptor, completeListRow, renderCompleteReport, completeEvent, completeBeforeGoto, completeSuggestions, completeAnswer } from "./report-complete.js";
 import { moduleConfiguration, moduleIssues } from "./analysis-module-data.js";
-import { renderTemplateEditor, renderTemplatePicker, renderTemplatePickerRows, templateModuleOptions, templateEditorStatus } from "./report-template-editor.js";
+import { renderTemplateEditor, renderTemplatePicker, renderTemplatePickerRows, templateModuleOptions, templateEditorStatus, templateDirectoryItems, ensureTemplateDirectory, syncTemplateDirectory } from "./report-template-editor.js";
+import { applyReportDirectory, canEditReport, saveReportPresentation, moveDirectory, updateDirectory, removeDirectoryGroup } from "./report-directory-data.js";
+import { directoryEditorHTML, directoryNameEvent, beginDirectoryRename, syncDirectoryNames, commitDirectoryNames } from "./report-directory-ui.js";
+import { directoryReorderEvent } from "./report-directory-drag.js";
+import { currentActor } from "./composer-data.js";
 import { selectedCandidateId, findExperimentResult, reportExperimentLabel } from "./experiment-identity.js";
 import "./multi-experiment.css";
 import "./report-template-catalog.css";
 import "./experiment-workbench.css";
+import "./report-showcase.css";
+import "./report-multi-updated.css";
 
 const esc = value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const icon = name => `<i data-lucide="${name}"></i>`;
@@ -44,8 +52,6 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
   };
   const reportViews = new Map();
   const bundledReport = demoModuleReport();
-  const mixedReport = demoMixedModuleReport();
-  const matrixReport = demoMatrixModuleReport();
   const defaultDraft = type => ({ analysisType: type, goal: demoGoal, templateId: publishedTemplates(store, type)[0]?.id || "",
     catalogType: "all", moduleIds: [], experiments: [], bulk: "", supplement: "", unifiedStart: "", unifiedEnd: "", scenario: "normal" });
   const draft = () => {
@@ -97,6 +103,7 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
     createIcons({ icons });
   }
   function renderTemplates(id) {
+    const directoryOpen = activeTemplate?.id === id && outlet.querySelector(".mt-directory")?.open;
     if (!id) {
       activeTemplate = null;
       const creatorName = creatorLabel(store.reportTemplates.find(template => template.createdBy === templateCreator) || {});
@@ -123,6 +130,7 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
     } else activeTemplate = store.reportTemplates.find(template => template.id === id);
     if (!activeTemplate) { location.hash = "/templates"; return; }
     outlet.innerHTML = renderTemplateEditor(store, activeTemplate, errors);
+    if (directoryOpen) outlet.querySelector(".mt-directory").open = true;
     createIcons({ icons });
   }
   function renderExperimentRows() {
@@ -298,6 +306,8 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
   }
   async function handleAction(trigger) {
     const action = trigger.dataset.action.slice(3), state = draft(), id = trigger.dataset.id;
+    if (activeTemplate && ["save-template", "publish-template", "add-section", "move-section", "remove-section"].includes(action)
+      && !commitDirectoryNames(outlet)) return;
     if (action === "choose-template") {
       const template = publishedTemplates(store, "all").find(template => template.id === id);
       if (!template) { showToast("模板已下线或发布版本不可用"); return; }
@@ -360,6 +370,7 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
       templatePage += action === "template-prev" ? -1 : 1; renderTemplateRows();
     }
     if (action === "save-template" || action === "publish-template") {
+      syncTemplateDirectory(store, activeTemplate);
       errors = action === "publish-template" ? templateIssues(store, activeTemplate) : [];
       if (!errors.length) {
         if (action === "publish-template") publishTemplate(store, activeTemplate);
@@ -389,6 +400,8 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
         }
       }
       activeTemplate.sections = sections;
+      ensureTemplateDirectory(store, activeTemplate);
+      syncTemplateDirectory(store, activeTemplate);
       save(); closeDialog(); renderTemplates(activeTemplate.id);
     }
     if (action === "clear-template-goal" || action === "clear-template-apps") {
@@ -411,10 +424,10 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
       const index = Number(trigger.dataset.index), sections = activeTemplate.sections;
       if (action === "remove-section") sections.splice(index, 1);
       else {
-        const to = index + Number(trigger.dataset.direction);
-        if (to < 0 || to >= sections.length) return;
-        const [section] = sections.splice(index, 1); sections.splice(to, 0, section);
+        if (!moveDirectory(activeTemplate.directory, sections[index].id, Number(trigger.dataset.direction))) return;
       }
+      ensureTemplateDirectory(store, activeTemplate);
+      syncTemplateDirectory(store, activeTemplate);
       save(); renderTemplates(activeTemplate.id);
     }
     if (action === "fill-demo") {
@@ -464,6 +477,17 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
   }
   function handleModel(event) {
     const el = event.target, model = el.dataset.model;
+    if (el.dataset.rdScope === "template" && activeTemplate) {
+      if (event.type !== "rd-rename") return true;
+      updateDirectory(activeTemplate.directory, el.dataset.rdField, el.dataset.rdId, el.value);
+      syncTemplateDirectory(store, activeTemplate); save();
+      const content = document.createElement("div");
+      content.innerHTML = directoryEditorHTML(activeTemplate.directory, templateDirectoryItems(store, activeTemplate), "template");
+      outlet.querySelector(".rd-preview").replaceWith(content.querySelector(".rd-preview"));
+      syncDirectoryNames(outlet, activeTemplate.directory, templateDirectoryItems(store, activeTemplate));
+      outlet.querySelector(".mt-status").textContent = templateEditorStatus(activeTemplate);
+      return true;
+    }
     if (!model?.startsWith("ma-")) return false;
     const isChange = el.type === "checkbox" || el.tagName === "SELECT";
     if (event.type !== (isChange ? "change" : "input")) return true;
@@ -544,7 +568,39 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
       label.querySelector(".ma-observation-date-value").textContent = dateLabel(label.querySelector("input").value);
     });
   }
+  for (const eventName of ["input", "change", "rd-rename"]) outlet.addEventListener(eventName, event => {
+    if (event.target.dataset.rdScope === "template") handleModel(event);
+  });
+  function reorderTemplateDirectory(event) {
+    if (!activeTemplate) return false;
+    const change = directoryReorderEvent(event, outlet, activeTemplate.directory);
+    if (!change) return false;
+    if (change.changed) {
+      syncTemplateDirectory(store, activeTemplate); save(); renderTemplates(activeTemplate.id);
+      outlet.querySelector(change.focus)?.focus({ preventScroll: true });
+    }
+    return true;
+  }
+  for (const type of ["dragstart", "dragenter", "dragover", "dragleave", "drop", "dragend"])
+    outlet.addEventListener(type, reorderTemplateDirectory);
   outlet.addEventListener("click", event => {
+    if (directoryNameEvent(event)) return;
+    const directoryAction = event.target.closest('[data-rd-action][data-rd-scope="template"]');
+    if (directoryAction && activeTemplate) {
+      if (!commitDirectoryNames(outlet)) return;
+      const { rdAction: action, rdId: id } = directoryAction.dataset;
+      let addedId;
+      if (action === "add-group") {
+        addedId = multiId("directory-group");
+        activeTemplate.directory.groups.push({ id: addedId, title: `分组 ${activeTemplate.directory.groups.length + 1}` });
+      }
+      else if (action === "remove-group") removeDirectoryGroup(activeTemplate.directory, id);
+      else return;
+      syncTemplateDirectory(store, activeTemplate); save(); renderTemplates(activeTemplate.id);
+      if (addedId) beginDirectoryRename(outlet.querySelector(`[data-rd-group="${addedId}"] .rd-name`));
+      else (outlet.querySelector(`[data-rd-action="${action}"][data-rd-id="${id}"]:not(:disabled)`) || outlet.querySelector('[data-rd-action="add-group"]'))?.focus({ preventScroll: true });
+      return;
+    }
     const input = event.target.closest('.ma-observation-date input[type="date"]');
     if (input && !input.disabled && input.showPicker) {
       try { input.showPicker(); } catch { /* Keep the native date input available as a fallback. */ }
@@ -555,12 +611,20 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
     if (menu && !menu.contains(event.target)) menu.open = false;
   });
   outlet.addEventListener("keydown", event => {
+    if (directoryNameEvent(event)) return;
+    if (reorderTemplateDirectory(event)) return;
     const menu = outlet.querySelector(".ma-template-creator[open]");
     if (event.key === "Escape" && menu) {
       menu.open = false; menu.querySelector("summary").focus(); event.preventDefault();
     }
   });
   function reportView(report) { if (!reportViews.has(report.id)) reportViews.set(report.id, {}); return reportViews.get(report.id); }
+  function canonicalReport(id) {
+    if (id === "r-complete-showcase") return completeDescriptor();
+    const saved = id === bundledReport.id ? bundledReport
+      : store.multiAnalysis.reports.find(report => report.id === id);
+    return saved && reportDescriptor(saved);
+  }
   return {
     handleAction, handleModel,
     render(page, id, extra) {
@@ -571,34 +635,42 @@ export function createMultiExperimentUI({ store, outlet, main, persist, showToas
     },
     reports: {
       getReport: id => {
-        if (id === "r-single-reference") return referenceDescriptor();
-        const saved = id === bundledReport.id ? bundledReport : id === mixedReport.id ? mixedReport : id === matrixReport.id ? matrixReport
-          : store.multiAnalysis.reports.find(report => report.id === id);
-        return saved && reportDescriptor(saved);
+        return applyReportDirectory(canonicalReport(id), store.reportPresentations?.[id]);
       },
       getList: () => [
-        referenceListRow(),
-        reportListRow(matrixReport),
+        completeListRow(),
         reportListRow(bundledReport),
-        reportListRow(mixedReport),
         ...store.multiAnalysis.reports.filter(report => !report.private).map(reportListRow),
         ...store.multiAnalysis.tasks.filter(task => !task.private && (task.status === "running" || !task.reportId))
           .map(task => ({ ...reportListRow(task), href: `#/experiments/task/${task.id}`, taskOnly: true }))
-      ],
-      renderBody: report => report.referenceReport ? renderReferenceReport(report, reportView(report)) : report.custom ? renderMultiReport(report, reportView(report)) : null,
-      suggestions: (report, scope) => report?.referenceReport ? ["总结这份报告的核心结论", "PreAA 的显著性标准有什么区别？", "哪些类目的表现需要进一步核对？"] : report?.custom ? multiSuggestions(report, scope) : null,
-      answer: (report, question, scope) => report?.referenceReport ? referenceAnswer(question, scope) : report?.custom ? multiAnswer(report, question, scope, reportView(report)) : null,
+      ].map(row => {
+        const presentation = store.reportPresentations?.[row.rid];
+        if (row.rid === "r-complete-showcase" && presentation?.presentationVersion !== 2) return row;
+        return presentation?.reportTitle ? { ...row, title: presentation.reportTitle } : row;
+      }),
+      canEdit: report => canEditReport(report, currentActor),
+      savePresentation(report, draft) {
+        saveReportPresentation(store, canonicalReport(report.id), draft, currentActor);
+        save(); onReportsChanged();
+      },
+      renderBody: report => report.completeReport ? renderCompleteReport(report, reportView(report)) : report.showcaseReport ? renderShowcaseReport(report, reportView(report)) : report.referenceReport ? renderReferenceReport(report, reportView(report)) : report.custom ? renderMultiReport(report, reportView(report)) : null,
+      suggestions: (report, scope) => report?.completeReport ? completeSuggestions(scope) : report?.showcaseReport ? showcaseSuggestions(scope) : report?.referenceReport ? ["总结这份报告的核心结论", "PreAA 的显著性标准有什么区别？", "哪些类目的表现需要进一步核对？"] : report?.custom ? multiSuggestions(report, scope) : null,
+      answer: (report, question, scope) => report?.completeReport ? completeAnswer(question, scope, reportView(report)) : report?.showcaseReport ? showcaseAnswer(question, scope) : report?.referenceReport ? referenceAnswer(question, scope) : report?.custom ? multiAnswer(report, question, scope, reportView(report)) : null,
       normalizeScope(report, scope) {
-        if (!report?.moduleReport || report.referenceReport) return scope;
+        if (!report?.moduleReport || report.referenceReport || report.showcaseReport || report.completeReport) return scope;
         const module = report.moduleContent.find(module => scope?.startsWith(`${module.id}-data-`));
         return module ? singleScope(module.index, moduleView(reportView(report), module).experimentId) : scope;
       },
       beforeGoto(report, scope) {
+        if (report.completeReport) return completeBeforeGoto(scope, reportView(report));
+        if (report.showcaseReport) return showcaseBeforeGoto(scope, reportView(report));
         if (!report.custom || report.referenceReport) return false;
         return prepareModuleCitation(report, scope, reportView(report));
       },
       handleEvent(event, report) {
         if (!report?.custom) return false;
+        if (report.completeReport) return completeEvent(event, reportView(report));
+        if (report.showcaseReport) return showcaseEvent(event, reportView(report));
         if (report.referenceReport) return referenceEvent(event, reportView(report));
         return applyModuleReportEvent(event, report, reportView(report));
       }

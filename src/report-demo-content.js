@@ -235,8 +235,14 @@ function findSec(rep, id) {
   if (rep.summary && rep.summary.id === id) return { ...rep.summary, short: '实验核心结论' };
   return flatSections(rep).find(s => s.id === id);
 }
-function tocHTML(rep) {
-  return `<nav class="toc" aria-label="报告目录"><div class="toc-inner">${rep.sections.map(s => {
+function tocHTML(rep, header = "") {
+  if (rep.directoryToc) {
+    return `<nav class="toc" aria-label="报告目录"><div class="toc-inner">${header}${rep.directoryToc.map((entry, index) =>
+      `<button class="toc-item" data-goto="${esc(entry.id)}"${entry.groupId ? ` data-directory-group="${esc(entry.groupId)}"` : ""} title="${esc(entry.title)}"><span>${String(index + 1).padStart(2, "0")}</span><span>${esc(entry.title)}</span></button>${entry.children
+        ? `<div class="toc-sub">${entry.children.map((child, i) => `<button class="toc-item" data-goto="${esc(child.id)}" title="${esc(child.title)}"><span>${index + 1}.${i + 1}</span><span>${esc(child.title)}</span></button>`).join("")}</div>` : ""}`
+    ).join("")}</div></nav>`;
+  }
+  return `<nav class="toc" aria-label="报告目录"><div class="toc-inner">${header}${rep.sections.map(s => {
     if (!s.group) return `<button class="toc-item" data-goto="${s.id}"><span>${s.no}</span><span>${esc(s.title)}</span></button>`;
     return `<button class="toc-item" data-goto="${s.children[0].id}" title="${esc(s.title)}"><span>${s.no}</span><span>${esc(s.title)}</span></button><div class="toc-sub">${s.children.filter(c => !c.hiddenToc).map(c => `<button class="toc-item" data-goto="${c.id}" title="${esc(c.short)}"><span>${c.no}</span><span>${esc(c.short)}</span></button>`).join('')}</div>`;
   }).join('')}</div></nav>`;
@@ -550,9 +556,9 @@ function renderMD(src) {
 }
 
 return {
-  reports: REPORTS,
+  reports: {},
   // The supplied demo contains complete detail data for these two reports.
-  list: LIST.filter(r => REPORTS[r.rid]),
+  list: [],
   state: S, esc, ic, flatSections, findSec, tocHTML, blocksHTML, askBtn,
   secHTML, tableBlockHTML, renderMD, answer, suggFor
 };
