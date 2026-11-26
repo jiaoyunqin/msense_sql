@@ -1,5 +1,5 @@
-import { columnBarDomains, cellBarGeometry, dataBarColumn, dataBarAppearance, comparisonDirection, significantResult } from "./report-table-formatting.js";
-import { tableFormat, formatButton, formatPanel, tableFormatEvent } from "./report-table-format-controls.js";
+import { columnBarDomains, dataBarColumn, dataBarAttributes, comparisonDirection, significantResult } from "./report-table-formatting.js";
+import { reportBarId, reportBarIds } from "./analysis-module-visualization.js";
 
 const esc = value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const finite = value => typeof value === "number" && Number.isFinite(value);
@@ -12,10 +12,12 @@ const selector = (name, value) => `[${name}=${JSON.stringify(String(value))}]`;
 export function detailTable(module, scope, dataset, matrix = false) {
   const fields = dataset.fields;
   const records = matrix ? dataset.columns : dataset.records;
+  const selectedBars = reportBarIds(module.configuration);
   return {
     id: `dt-${scope}`, scope: module.id, fields, records, grouped: matrix,
     columns: [{ id: "label", index: 0 }, ...fields.map((field, index) => ({
-      id: metricKey(field), index: index + 1, metric: field.name
+      id: metricKey(field), index: index + 1, metric: field.name,
+      dataBar: selectedBars.has(reportBarId(field.sourceId ?? dataset.sourceId, field.key))
     }))],
     rows: records.map(record => ({ record, cells: [{ unit: "text" }, ...fields.map((field, index) => {
       const cell = matrix ? record.cells[metricKey(field)] : record.cells[index];
@@ -24,13 +26,6 @@ export function detailTable(module, scope, dataset, matrix = false) {
         unit: finite(value) ? field.unit || "number" : "text", lift: cell?.uplift };
     })] }))
   };
-}
-
-const availableMetrics = new WeakMap();
-export function detailMetrics(model) {
-  if (!availableMetrics.has(model)) availableMetrics.set(model, model.fields.flatMap((field, index) =>
-    dataBarColumn(model, model.columns[index + 1]) ? [{ id: metricKey(field), label: field.name }] : []));
-  return availableMetrics.get(model);
 }
 
 export function detailReading(view, model) {
@@ -72,13 +67,8 @@ export function detailRecords(model, reading, visible = model.records) {
   return groups.sort((a, b) => compare(a.representative, b.representative)).flatMap(group => group.records);
 }
 
-const context = (view, models) => ({ source: { id: view.reportId, modules: models }, metrics: detailMetrics, scope: model => model.scope });
-export const detailFormat = (view, model) => tableFormat(view, model, context(view, [model]));
-export function detailControls(view, model) {
-  return `${formatButton(model, view)}<button type="button" class="btn-o sm cf-reset-order" data-detail-table="${model.id}" data-detail-reset>恢复排序</button>`;
-}
-export function detailPanel(view, model, format) {
-  return formatPanel(model, view, format, { metrics: detailMetrics(model) });
+export function detailControls(model) {
+  return `<button type="button" class="btn-o sm cf-reset-order" data-detail-table="${model.id}" data-detail-reset>恢复排序</button>`;
 }
 
 const grip = '<svg width="12" height="16" viewBox="0 0 12 16" fill="currentColor" aria-hidden="true"><circle cx="4" cy="4" r="1.2"/><circle cx="8" cy="4" r="1.2"/><circle cx="4" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="4" cy="12" r="1.2"/><circle cx="8" cy="12" r="1.2"/></svg>';
@@ -95,26 +85,21 @@ export function detailHeading(model, field, reading) {
 export const detailSortAria = (field, reading) => reading.sort?.column === metricKey(field)
   ? ` aria-sort="${reading.sort.direction === "asc" ? "ascending" : "descending"}"` : "";
 
-export function detailValue(text, value, model, field, format) {
+export function detailValue(text, value, model, field) {
   const column = model.columns.find(column => column.id === metricKey(field));
-  const allowed = format.bars && (format.metrics === null || format.metrics.includes(column.id));
-  const domain = allowed && dataBarColumn(model, column) ? columnBarDomains(model).get(column.index) : null;
-  const bar = cellBarGeometry(value, domain);
-  const appearance = bar ? dataBarAppearance(format, detailMetrics(model).findIndex(metric => metric.id === column.id), value, domain) : null;
-  return `<span${bar ? ` class="cf-cell-value" style="--cf-bar-left:${bar.left}%;--cf-bar-width:${bar.width}%;--cf-bar-zero:${bar.zero}%;--cf-bar-rgb:${appearance.rgb};${appearance.level ? `--cf-bar-fill:${appearance.level.fill}%;` : ""}"${bar.zero > 0 && bar.zero < 100 ? " data-cf-bar-axis" : ""}${appearance.level ? ` data-cf-bar-level="${appearance.level.id}"` : ""}` : ""}>${esc(text)}</span>`;
+  const domain = column?.dataBar && dataBarColumn(model, column) ? columnBarDomains(model).get(column.index) : null;
+  return `<span${dataBarAttributes(value, domain)}>${esc(text)}</span>`;
 }
 
-export function detailComparison(cell, format) {
+export function detailComparison(cell) {
   const direction = comparisonDirection(cell.uplift);
-  const emphasized = format.trends && direction && direction !== "flat" && significantResult({ significance: cell.sig });
+  const emphasized = direction && direction !== "flat" && significantResult({ significance: cell.sig });
   const arrow = direction === "up" ? "M6 11V1m-4 4 4-4 4 4" : "M6 1v10m-4-4 4 4 4-4";
   return `${Object.hasOwn(cell, "uplift") ? `<small class="cf-change cf-change-${emphasized ? direction : "muted"}" title="${esc(cell.sig || "")}">${emphasized ? `<svg width="11" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="${arrow}"/></svg>` : ""}增幅 ${finite(cell.uplift) ? `${cell.uplift > 0 ? "+" : ""}${cell.uplift.toFixed(2)}%` : "—"}</small>` : ""}
     ${cell.sig ? `<small>${esc(cell.sig)}</small>` : ""}`;
 }
 
 export function detailEvent(event, view, models) {
-  const formatChange = tableFormatEvent(event, view, context(view, models));
-  if (formatChange) return formatChange;
   const target = event.target.closest("[data-detail-table]");
   const model = target && models.find(model => model.id === target.dataset.detailTable);
   if (!model) return false;

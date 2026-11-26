@@ -2,12 +2,15 @@ import { createIcons, icons } from "lucide";
 import { clone, uid, currentActor, businessGoal } from "./composer-data.js";
 import {
   initializeModules, moduleBuiltins, builtinSource, sqlSource, sourceDefinition, newAnalysisModule,
-  moduleHash, moduleConfiguration, moduleState, moduleIssues, calculationCandidates,
+  moduleHash, moduleConfiguration, moduleState, moduleIssues, calculationCandidates, moduleBarCandidates, pruneModuleBars,
   calculatedMetricIssues, includeCalculationDependency, newCalculatedMetric, metricReferenceKey, copyModuleSources
 } from "./analysis-module-data.js";
 import { runModule } from "./analysis-module-runner.js";
-import { sourceMetricGrains, commonCalculationGrains } from "./analysis-module-calculations.js";
+import { sourceMetricGrains, commonCalculationGrains, parseCalculationNotes } from "./analysis-module-calculations.js";
+import { observationOptions } from "./analysis-module-observation.js";
 import { calculationBlockId, reportBlockIds, orderReportMetrics, orderReportDimensions, moveOrderedKey, pruneModuleReportOrder } from "./analysis-module-report-order.js";
+import { recommendReportBars, reportBarId, reportBarIds } from "./analysis-module-visualization.js";
+import { aiMark } from "./ai-mark.js";
 import "./analysis-modules.css";
 // Share the online catalog presentation with the report template list.
 import "./report-template-catalog.css";
@@ -15,6 +18,8 @@ import "./report-template-catalog.css";
 const esc = (value = "") => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const icon = (name) => `<i data-lucide="${name}"></i>`;
 const button = (action, text, name = "", extra = "", cls = "") => `<button type="button" class="am-button ${cls}" data-action="mod-${action}" ${extra}>${name ? icon(name) : ""}${text}</button>`;
+const aiButton = (action, label, disabled = false) =>
+  button(action, `${aiMark(`am-${action}`)}<span>${label}</span>`, "", disabled ? "disabled" : "", "am-ai-action");
 const stateNames = { draft: "草稿", online: "已上线", offline: "已下线" };
 const time = (value) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }).replaceAll("/", "-") : "";
 const listTime = (value) => {
@@ -25,6 +30,12 @@ const listTime = (value) => {
 };
 const field = (title, key, value, placeholder = "") => `<label class="am-field"><span>${title}</span><input data-model="mod-field.${key}" value="${esc(value)}" placeholder="${esc(placeholder)}"></label>`;
 const area = (title, key, value, placeholder = "") => `<label class="am-field am-area"><span>${title}</span><textarea data-model="mod-field.${key}" placeholder="${esc(placeholder)}">${esc(value)}</textarea></label>`;
+const choose = (model, label, entries, selected) => `<div class="am-select"><select data-model="${model}" aria-label="${label}">${entries.map(([value, text, disabled]) =>
+  `<option value="${esc(value)}"${value === selected ? " selected" : ""}${disabled ? " disabled" : ""}>${esc(text)}</option>`).join("")}</select>${icon("chevron-down")}</div>`;
+const help = (label, text) => `<details class="am-field-help"><summary aria-label="了解${label}">${icon("circle-help")}</summary><div><strong>${label}</strong><p>${text}</p></div></details>`;
+const isOverall = field => /^整体(?:[（(]|$)/.test(field.name);
+const dimensionLabel = field => field.name === "整体" ? "整体（不拆分）" : field.name;
+const appOptions = ["抖音", "极速版", "独立端"];
 
 export function createAnalysisModules({ store, outlet, main, persist, showToast, openDialog, closeDialog, render }) {
   initializeModules(store);
@@ -87,7 +98,7 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       const id = esc(module.id), person = creatorLabel(module), updatedAt = module.updatedAt || module.savedAt || "";
       return `<tr data-module-id="${id}" data-analysis-type="${esc(module.analysisType || "single")}">
         <th scope="row"><a class="ma-template-name" href="#/modules/${id}" title="${esc(name)}">${esc(name)}</a>${module.description ? `<p class="ma-template-description" title="${esc(module.description)}">${esc(module.description)}</p>` : ""}</th>
-        <td>${esc(module.goal || businessGoal)}</td><td>${esc(module.apps?.join("、") || "不限端")}</td>
+        <td>${esc(module.goal || "—")}</td><td>${esc(module.apps?.join("、") || "不限端")}</td>
         <td><span class="ma-template-status ${status}"${module.versions.length ? ` title="已发布 v${module.versions.at(-1).number}"` : ""}>${stateNames[status]}</span></td>
         <td><span class="ma-template-person" title="${esc(creatorOf(module) || person)}"><span class="ma-template-avatar" aria-hidden="true">${esc(person === "—" ? "?" : [...person][0])}</span><span>${esc(person)}</span></span></td>
         <td><time${updatedAt ? ` datetime="${esc(updatedAt)}"` : ""}>${listTime(updatedAt)}</time></td>
@@ -165,23 +176,27 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
   }
   function renderPicker() {
     const module = store.analysis;
+    if (!module.goal) return "";
     const chosen = options().filter((option) => module.sources.some((source) => optionKey(source) === option.key));
     return `<div class="am-source-picker"><label class="am-label">取数模块</label><details class="am-multi-select">
-      <summary><span>${esc(chosen.map((option) => option.name).join("，") || "请选择取数模块")}</span>${icon("chevron-down")}</summary>
+      <summary aria-label="选择取数模块"><span>${esc(chosen.map((option) => option.name).join("，") || "可选择一个或多个取数模块")}</span>${icon("chevron-down")}</summary>
       <div class="am-picker-menu"><label class="am-search">${icon("search")}<input type="search" data-model="mod-option-search" placeholder="搜索取数模块" aria-label="搜索取数模块"></label><div class="am-picker-options">
       ${options().map((option) => `<label class="am-picker-option" data-option-name="${esc(option.name)}"><input type="checkbox" data-model="mod-source-choice" value="${option.key}" ${chosen.some((entry) => entry.key === option.key) ? "checked" : ""}><span>${esc(option.name)}</span></label>`).join("")}
-      </div></div></details>${module.sources.length ? button("clear-sources", "", "x", 'aria-label="清空取数模块" title="清空"') : ""}</div>`;
+      </div></div></details>${module.sources.length ? button("clear-sources", "", "x", 'aria-label="清空取数模块" title="清空"') : '<p class="am-source-empty">请选择取数模块</p>'}</div>`;
   }
   function orderChips(kind, blockId, fields) {
     return fields.length ? fields.map(field => `<button type="button" class="am-chip am-order-chip" draggable="true" ${orderAttrs(kind, blockId, field.key)}
       title="拖拽排序，或用方向键调整"${field.showInReport === false ? ' data-report-hidden="true"' : ""}>${icon("grip-vertical")}<span>${esc(field.name || "未命名计算指标")}</span>${field.showInReport === false ? '<small>不展示</small>' : ""}</button>`).join("") : `<small>暂未选择${kind === "metrics" ? "指标" : "维度"}</small>`;
   }
-  function sourceSummary(source) {
+  function sourceSummary(source, interactive = true) {
     const definition = sourceDefinition(store, source);
     if (!definition) return "<p>固定版本已不可用，请移除后重新选择。</p>";
     const metrics = orderReportMetrics(store.analysis, source.id, definition.metrics.filter(field => source.metricKeys.includes(field.key)));
     const dimensions = orderReportDimensions(store.analysis, source.id, definition.dimensions.filter(field => source.dimensionKeys.includes(field.key)));
-    return `<div><span>指标</span><div>${orderChips("metrics", source.id, metrics)}</div></div>${definition.dimensions.length ? `<div><span>维度</span><div>${orderChips("dimensions", source.id, dimensions)}</div></div>` : ""}`;
+    const summary = (kind, fields) => interactive ? orderChips(kind, source.id, fields)
+      : fields.map(field => `<span class="am-chip">${esc(field.name)}</span>`).join("") || `<small>暂未选择${kind === "metrics" ? "指标" : "维度"}</small>`;
+    return `<div><span>指标</span><div>${summary("metrics", metrics)}</div></div>${definition.dimensions.length
+      ? `<div><span>维度</span><div>${summary("dimensions", dimensions.map(field => ({ ...field, name: dimensionLabel(field) })))}</div></div>` : ""}`;
   }
   function calculationDimensionNames() {
     const module = store.analysis;
@@ -197,11 +212,11 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
         return sourceDefinition(store, source)?.dimensions.find(dimension => dimension.key === left.modeId)?.name || "整体";
       })))];
   }
-  function reportOrderHTML() {
+  function reportOrderHTML(open = false) {
     const module = store.analysis, blocks = reportBlockIds(module);
-    if (!blocks.length) return "";
-    return `<section class="am-report-order" aria-label="指标与维度及报告顺序">
-      <header><strong>指标 × 维度</strong><span>拖拽调整报告展示顺序</span></header>
+    if (!module.goal || !blocks.length) return "";
+    return `<details class="am-report-order" aria-label="指标与维度及报告顺序"${open ? " open" : ""}>
+      <summary><strong>指标 × 维度及报告排序</strong>${icon("chevron-down")}</summary>
       <div class="am-order-blocks">${blocks.map((blockId, index) => {
         const source = module.sources.find(source => source.id === blockId);
         const name = source ? sourceDefinition(store, source)?.name || "固定版本已不可用" : "计算指标";
@@ -210,15 +225,55 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
             <div class="am-order-block-actions">${button("order-move", "", "arrow-up", `${orderAttrs("blocks", blockId, blockId)} data-direction="-1" aria-label="上移${esc(name)}" ${index === 0 ? "disabled" : ""}`)}${button("order-move", "", "arrow-down", `${orderAttrs("blocks", blockId, blockId)} data-direction="1" aria-label="下移${esc(name)}" ${index === blocks.length - 1 ? "disabled" : ""}`)}</div></header>
           <div class="am-selection-summary">${source ? sourceSummary(source) : `<div><span>指标</span><div>${orderChips("metrics", calculationBlockId, module.calculatedMetrics)}</div></div><div><span>维度</span><div>${calculationDimensionNames().map(name => `<span class="am-chip">${esc(name)}</span>`).join("") || "<small>配置表达式后显示</small>"}</div></div>`}</div>
         </article>`;
-      }).join("")}</div><p class="am-order-status" aria-live="polite"></p></section>`;
+      }).join("")}</div><p class="am-order-status" aria-live="polite"></p></details>`;
   }
   function refreshReportOrder() {
     const container = outlet.querySelector(".am-report-order-wrap");
-    if (container) { container.innerHTML = reportOrderHTML(); createIcons({ icons }); }
+    if (container) {
+      const open = container.querySelector("details")?.open;
+      container.innerHTML = reportOrderHTML(open); createIcons({ icons });
+    }
+    refreshVisualization();
+  }
+
+  function visualizationHTML(module, candidates, open = false) {
+    const ids = reportBarIds(module), selected = candidates.filter(({ sourceId, key }) => ids.has(reportBarId(sourceId, key)));
+    const groups = Map.groupBy(candidates, candidate => candidate.sourceId);
+    return `<div class="am-vis-head"><div><h2 id="am-vis-title">数据可视化</h2><p>基于分析思路 AI 一键推荐重点指标，在报告数据明细中用数据条突出显示。</p></div>
+      ${aiButton("recommend-bars", "AI生成可视化推荐", !candidates.length || !module.reasoning.trim())}</div>
+      <details class="am-vis-picker"${open && candidates.length ? " open" : ""}>
+        <summary><span>数据条</span><strong data-vis-count>${selected.length ? `已选 ${selected.length} 项` : "未选择"}</strong>${icon("chevron-down")}</summary>
+        <div class="am-vis-options">${[...groups.values()].map(fields => `<fieldset><legend>${esc(fields[0].sourceName || "取数指标")}</legend><div>${fields.map(({ sourceId, key, name }) => {
+          const id = reportBarId(sourceId, key);
+          return `<label><input type="checkbox" data-model="mod-bar-metric" value="${esc(id)}"${ids.has(id) ? " checked" : ""}><span>${esc(name)}</span></label>`;
+        }).join("")}</div></fieldset>`).join("")}</div></details>
+      <div class="am-vis-selected" data-vis-selected></div>
+      <p class="am-vis-status" role="status">${candidates.length ? "" : "请先选择在报告中展示的数值指标。"}</p>`;
+  }
+  function refreshVisualization(message = "") {
+    const region = outlet.querySelector(".am-visualization");
+    if (!region) return;
+    const module = store.analysis, candidates = moduleBarCandidates(store, module);
+    const open = region.querySelector("details")?.open;
+    const focused = region.contains(document.activeElement) ? document.activeElement : null;
+    region.innerHTML = visualizationHTML(module, candidates, open);
+    updateVisualizationSelection(region, candidates, message);
+    if (focused?.matches('[data-action="mod-recommend-bars"]'))
+      region.querySelector('[data-action="mod-recommend-bars"]').focus({ preventScroll: true });
+    createIcons({ icons });
+  }
+  function updateVisualizationSelection(region, candidates, message) {
+    const ids = reportBarIds(store.analysis);
+    const selected = candidates.filter(({ sourceId, key }) => ids.has(reportBarId(sourceId, key)));
+    region.querySelector("[data-vis-count]").textContent = selected.length ? `已选 ${selected.length} 项` : "未选择";
+    region.querySelector("[data-vis-selected]").innerHTML = selected.map(({ name, sourceName }) =>
+      `<span class="am-vis-chip" title="${esc(sourceName || "")}">${esc(name)}</span>`).join("");
+    region.querySelector(".am-vis-status").textContent = message || (!candidates.length ? "请先选择在报告中展示的数值指标。"
+      : !store.analysis.reasoning.trim() ? "填写分析思路后可使用推荐，也可以直接勾选指标。" : "");
   }
   function metricConfigurationHTML() {
     const module = store.analysis, active = configurationTabs.get(module.id) || "existing";
-    return `<section class="am-metric-configuration" aria-label="指标配置"${!module.sources.length && !module.calculatedMetrics?.length ? " hidden" : ""}>
+    return `<section class="am-metric-configuration" aria-label="指标配置"${!module.goal || !module.sources.length && !module.calculatedMetrics?.length ? " hidden" : ""}>
       <header><strong>指标配置</strong><div class="am-configuration-tabs" role="tablist" aria-label="指标配置方式">
         ${[["existing", "已有指标"], ["calculated", "计算指标"]].map(([key, label]) => `<button type="button" role="tab" id="am-tab-${key}" data-action="mod-configuration-tab" data-tab="${key}" aria-controls="am-panel-${key}" aria-selected="${active === key}" tabindex="${active === key ? 0 : -1}">${label}</button>`).join("")}</div></header>
       <div class="am-sources" id="am-panel-existing" role="tabpanel" aria-labelledby="am-tab-existing"${active !== "existing" ? " hidden" : ""}>${module.sources.map(sourceCard).join("") || '<p class="am-calc-hint">先选择取数模块，再选择指标和维度。</p>'}</div>
@@ -227,7 +282,7 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
   function refreshConfigurationVisibility() {
     const module = store.analysis, area = outlet.querySelector(".am-metric-configuration");
     if (!area) return;
-    area.hidden = !module.sources.length && !module.calculatedMetrics?.length;
+    area.hidden = !module.goal || !module.sources.length && !module.calculatedMetrics?.length;
     const active = configurationTabs.get(module.id) || "existing";
     area.querySelectorAll('[role="tab"]').forEach(tab => {
       tab.setAttribute("aria-selected", String(tab.dataset.tab === active));
@@ -264,24 +319,40 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
   function sourceCard(source) {
     const module = store.analysis, definition = sourceDefinition(store, source);
     if (!definition) return `<article class="am-source-card" data-source-id="${source.id}"><header><strong>固定版本已不可用</strong>${button("remove-source", "移除", "trash-2", `data-id="${source.id}"`)}</header></article>`;
-    const list = (kind, fields, selected) => `<section class="am-choice-column ${kind}"><header><div><strong>${kind === "metric" ? "指标" : "下钻维度"}</strong><span class="am-choice-count">已选 ${selected.length}/${fields.length}</span></div>
-      ${fields.length ? button("all", selected.length === fields.length ? "清空" : "全选", "", `data-id="${source.id}" data-kind="${kind}"`) : ""}</header>
-      ${fields.length ? `<label class="am-search">${icon("search")}<input type="search" data-model="mod-choice-search" data-kind="${kind}" data-source-id="${source.id}" aria-label="搜索${kind === "metric" ? "指标" : "下钻维度"}" placeholder="${kind === "metric" ? "搜索指标名称、Key 或口径" : "搜索下钻维度名称或 Key"}"></label>
-      <div class="am-choice-list">${fields.map((field) => `<label class="am-choice" data-search-text="${esc(`${field.name} ${field.key} ${field.description || ""}`.toLowerCase())}"><input type="checkbox" data-model="mod-choice" data-source-id="${source.id}" data-kind="${kind}" value="${esc(field.key)}" ${selected.includes(field.key) ? "checked" : ""}><span><strong>${esc(field.name)}</strong>${kind === "metric" && field.description ? `<small>${esc(field.description)}</small>` : ""}</span></label>`).join("")}<p class="am-search-empty" hidden>暂无匹配项</p></div>` : `<p class="am-no-dimensions">暂无下钻维度</p>`}</section>`;
+    const list = (kind, fields, selected) => `<section class="am-choice-column ${kind}"><header><div><strong>${kind === "metric" ? "指标" : "取数维度"}</strong><span class="am-choice-count">已选 ${selected.length} / ${fields.length}</span></div>
+      ${fields.length ? button("all", kind === "dimension" && fields.some(isOverall) ? "仅保留整体" : selected.length === fields.length ? "清空" : "全选", "", `data-id="${source.id}" data-kind="${kind}"`) : ""}</header>
+      ${fields.length ? `<label class="am-search">${icon("search")}<input type="search" data-model="mod-choice-search" data-kind="${kind}" data-source-id="${source.id}" aria-label="搜索${kind === "metric" ? "指标" : "取数维度"}" placeholder="${kind === "metric" ? "搜索指标名称、Key 或口径" : "搜索取数维度名称或 Key"}"></label>
+      <div class="am-choice-list">${fields.map((field) => `<label class="am-choice" data-search-text="${esc(`${field.name} ${field.key} ${field.description || ""}`.toLowerCase())}"><input type="checkbox" data-model="mod-choice" data-source-id="${source.id}" data-kind="${kind}" value="${esc(field.key)}" ${selected.includes(field.key) ? "checked" : ""}><span><strong>${esc(kind === "metric" ? field.name : dimensionLabel(field))}</strong>${kind === "metric" && field.description ? `<small>${esc(field.description)}</small>` : ""}</span></label>`).join("")}<p class="am-search-empty" hidden>暂无匹配项</p></div>` : `<p class="am-no-dimensions">暂无取数维度</p>`}</section>`;
     return `<article class="am-source-card ${source.expanded ? "expanded" : ""}" data-source-id="${source.id}">
-      <header><button type="button" class="am-source-title" data-action="mod-expand" data-id="${source.id}" aria-expanded="${source.expanded}"><strong>${esc(definition.name)}</strong><span class="am-selected-count">已选 ${source.metricKeys.length} 个指标${definition.dimensions.length ? ` · ${source.dimensionKeys.length} 个维度` : ""}</span>${source.kind === "sql" ? `<span class="am-version-tag">v${source.version}</span>` : ""}</button>
+      <header><button type="button" class="am-source-title" data-action="mod-expand" data-id="${source.id}" aria-expanded="${source.expanded}"><strong>${esc(definition.name)}</strong><span class="am-selected-count">已选 ${source.metricKeys.length} 个指标${definition.dimensions.length ? ` · ${source.dimensionKeys.length} 个取数维度` : ""}</span>${source.kind === "sql" ? `<span class="am-version-tag">v${source.version}</span>` : ""}</button>
       <div class="am-source-actions"><label class="am-report-check"><input type="checkbox" data-model="mod-report" data-source-id="${source.id}" ${source.showInReport ? "checked" : ""}>报告中展示</label>
       ${module.analysisType !== "multi" ? button("trial-source", "试跑取数", "flask-conical", `data-id="${source.id}" ${running || moduleIssues(store, { ...module, name: module.name || "新模块" }, [source], { sourceTrial: true }).length ? "disabled" : ""}`) : ""}
       ${button("expand", source.expanded ? "收起" : "展开", source.expanded ? "chevron-up" : "chevron-down", `data-id="${source.id}" aria-expanded="${source.expanded}" aria-controls="source-content-${source.id}"`)}
       ${button("remove-source", "移除", "trash-2", `data-id="${source.id}"`)}</div></header>
       <div class="am-source-content" id="source-content-${source.id}" ${source.expanded ? "" : "hidden"}>
         <p class="am-source-description">${esc(definition.description)}</p>
+        <div class="am-selection-summary am-source-summary">${sourceSummary(source, false)}</div>
         <div class="am-selection-columns">${list("metric", definition.metrics, source.metricKeys)}${list("dimension", definition.dimensions, source.dimensionKeys)}</div>
       </div></article>`;
+  }
+  function observationFields(module) {
+    const { anchor = "follow", days = 0 } = module.observation || {};
+    return choose("mod-observation-anchor", "模块观测区间", observationOptions, anchor)
+      + (anchor === "follow" ? "" : `<input type="number" min="0" max="2147483647" step="1" data-model="mod-observation-days" value="${esc(days ?? "")}" aria-label="偏移天数"><span>天</span>`);
+  }
+  function goalFields(module) {
+    return choose("mod-field.goal", "选择业务目标", [["", "请选择业务目标", true], ["平台新", "平台新", true],
+      ["平台流失-整体", "平台流失-整体", true], [businessGoal, businessGoal]], module.goal)
+      + (module.goal ? button("clear-goal", "", "x", 'aria-label="清空选择业务目标"') : "");
+  }
+  function appFields(apps) {
+    return `<details class="am-multi-select am-app-picker"><summary aria-label="选择适用端"><span${apps.length ? "" : ' class="am-placeholder"'}>${esc(apps.join("、") || "不选择表示不限端")}</span>${icon("chevron-down")}</summary>
+      <div class="am-picker-menu">${appOptions.map(app => `<label class="am-picker-option"><input type="checkbox" data-model="mod-app-choice" value="${app}"${apps.includes(app) ? " checked" : ""}><span>${app}</span></label>`).join("")}</div></details>`;
   }
   function renderEditor(id) {
     if (id === "new") {
       const module = newAnalysisModule();
+      module.goal = "";
       store.modules.push(module); store.analysis = module; persist();
       history.replaceState(null, "", `#/modules/${module.id}`);
     } else if (!activate(id)) { location.hash = "/modules"; return; }
@@ -289,22 +360,29 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
     const latest = module.versions.at(-1);
     const changed = latest && latest.signature !== moduleHash(module);
     outlet.innerHTML = `<div class="am-editor">
-      <header class="am-editor-header"><div class="am-editor-heading"><a href="#/modules" class="am-button am-back" aria-label="返回实验分析模块">${icon("arrow-left")}</a><div><div class="am-heading-line"><h1>${esc(module.name || "新建实验分析模块")}</h1><span class="am-state ${status}">${!module.savedAt ? "尚未保存" : changed ? "有未发布修改" : latest ? `v${latest.number} · ${stateNames[status]}` : "草稿"}</span></div><p>实验分析模块</p></div></div>
-      <div class="am-header-actions">${button("save", "保存草稿", "save")}${button("trial", "试跑", "flask-conical", running || moduleIssues(store, module).length || !module.reasoning.trim() ? "disabled" : "")}${button("publish", "发布新版本", "upload", running ? "disabled" : "", "primary")}</div></header>
+      <header class="am-editor-header"><div class="am-editor-heading"><a href="#/modules" class="am-button am-back" aria-label="返回配置列表">${icon("arrow-left")}</a><div><div class="am-heading-line"><h1>${esc(module.name || "新建实验分析模块")}</h1><span class="am-state ${status}">${!module.savedAt ? "尚未保存" : changed ? "有未发布修改" : latest ? `v${latest.number} · ${stateNames[status]}` : "草稿"}</span></div><p>实验分析模块</p></div></div>
+      <div class="am-editor-actions"><div class="am-header-actions">${button("save", "保存草稿", "save")}${button("trial", "试跑", "flask-conical")}${button("publish", "发布新版本", "upload", running ? "disabled" : "", "primary")}</div>
+        <p class="am-trial-hint" role="status"></p></div></header>
       <div class="am-editor-body"><div class="am-form-content"><div class="am-errors">${errors.length ? `<div class="p-issues" role="alert"><ul>${errors.map((error) => `<li>${esc(error)}</li>`).join("")}</ul></div>` : ""}</div>
         <div class="am-basics">${field("模块名称", "name", module.name, "例如：优惠券核销归因")}${field("模块说明", "description", module.description, "说明模块覆盖的分析范围")}
-        <div class="am-field"><span>业务目标</span><div class="am-goal">${businessGoal}${icon("chevron-down")}</div></div>
-        <label class="am-field"><span>适用端（可选）</span><select data-model="mod-apps"><option value="" ${!module.apps.length ? "selected" : ""}>不选择表示不限端</option><option value="抖音" ${module.apps.join(",") === "抖音" ? "selected" : ""}>抖音</option><option value="极速版" ${module.apps.join(",") === "极速版" ? "selected" : ""}>极速版</option><option value="抖音,极速版" ${module.apps.length > 1 ? "selected" : ""}>抖音、极速版</option></select></label>
-        <label class="am-field"><span>分析类型</span><select data-model="mod-field.analysisType"><option value="single" ${module.analysisType === "single" ? "selected" : ""}>单实验分析</option><option value="multi" ${module.analysisType === "multi" ? "selected" : ""}>多实验分析</option></select></label></div>
+        <div class="am-field"><span>业务目标</span><div class="am-inline-field am-goal-fields">${goalFields(module)}</div></div>
+        <div class="am-field"><span>适用端（可选）</span>${appFields(module.apps)}</div>
+        <div class="am-field"><div class="am-field-label">分析场景${help("单实验和多实验", "单实验：分析一个实验的策略与结果。多实验：比较多个独立实验的指标表现，保留各自的对照组和观测时间。")}</div>
+          ${choose("mod-field.analysisType", "选择分析场景", [["single", "单实验"], ["multi", "多实验"]], module.analysisType)}</div>
+        <div class="am-field"><div class="am-field-label">模块观测区间${help("模块观测区间", "基准日当天为第 0 天。例如，实验 11 月 1 日开始，选择开始日后 7 天，模块最多取到 11 月 8 日。如果实验分析选的截止日更早，则取到该截止日。")}</div>
+          <div class="am-inline-field am-observation-fields">${observationFields(module)}</div></div></div>
         <div class="am-picker-wrap">${renderPicker()}</div><div class="am-report-order-wrap">${reportOrderHTML()}</div>
         ${metricConfigurationHTML()}
-        ${area("分析思路（可选）", "reasoning", module.reasoning, "如需结论，请说明分析顺序、判断方法和归因证据的组织方式")}
-        ${area("注意事项（可选）", "considerations", module.considerations, "补充分析边界、数据口径及需要关注的问题")}
+        <div class="am-field am-area am-reasoning"><div class="am-reasoning-head"><label for="am-reasoning">分析思路（可选）</label>
+          ${aiButton("parse-calculations", "AI解析生成计算指标")}</div>
+          <textarea id="am-reasoning" data-model="mod-field.reasoning" placeholder="如需结论，请说明分析顺序、判断方法和归因证据的组织方式">${esc(module.reasoning)}</textarea></div>
+        <section class="am-visualization" aria-labelledby="am-vis-title"></section>
+        ${area("注意事项（可选）", "considerations", module.considerations, "补充口径、观察窗口或结果解读边界")}
         ${module.attempts.length ? `<details class="am-trial-history"><summary>试跑记录 <span>${module.attempts.length}</span></summary><div>${module.attempts.map((attempt) => `<a href="#/analysis/${attempt.id}"><span>${attempt.sourceTrial ? "取数试跑" : "分析试跑"} · ${attempt.status === "success" ? "成功" : attempt.status === "running" ? "运行中" : "失败"}</span><small>${esc(time(attempt.startedAt))}</small>${icon("arrow-up-right")}</a>`).join("")}</div></details>` : ""}
         ${module.multiAttempts?.length ? `<details class="am-trial-history"><summary>多实验试跑记录 <span>${module.multiAttempts.length}</span></summary><div>${module.multiAttempts.map(attempt => `<a href="${attempt.reportId ? `#/report/${attempt.reportId}` : `#/experiments/task/${attempt.taskId}`}"><span>模块私有试跑 · ${attempt.status === "running" ? "运行中" : attempt.status === "success" ? "成功" : "查看任务"}</span><small>${esc(time(attempt.startedAt))}</small></a>`).join("")}</div></details>` : ""}
-      </div><aside class="am-version-panel"><header><strong>版本记录</strong><span>${module.versions.length} 个版本</span></header>
+      </div><aside class="am-version-panel"><header><h2>版本记录</h2><span>${module.versions.length} 个版本</span></header>
         ${module.versions.length ? module.versions.slice().reverse().map((version) => `<button type="button" data-action="mod-version" data-number="${version.number}"><strong>v${version.number}</strong><small>${esc(time(version.publishedAt))}</small><span>${esc(version.operator)}</span></button>`).join("") : "<p>暂无版本记录</p>"}</aside></div></div>`;
-    refreshCalculationIssues(); createIcons({ icons });
+    refreshVisualization(); refreshCalculationIssues(); createIcons({ icons });
   }
   function refreshSources() {
     outlet.querySelector(".am-sources").innerHTML = store.analysis.sources.map(sourceCard).join("") || '<p class="am-calc-hint">先选择取数模块，再选择指标和维度。</p>';
@@ -314,7 +392,15 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
   function refreshActions() {
     const module = store.analysis;
     const trial = outlet.querySelector('[data-action="mod-trial"]');
-    if (trial) trial.disabled = running || moduleIssues(store, module).length > 0 || !module.reasoning.trim();
+    if (trial) {
+      const reason = running ? "试跑进行中" : !module.goal ? "请先选择业务目标"
+        : !module.savedAt ? "保存或发布完成后可试跑" : moduleIssues(store, module)[0] || (!module.reasoning.trim() ? "请填写分析思路" : "");
+      trial.disabled = Boolean(reason);
+      trial.setAttribute("aria-label", reason ? `暂不可试跑：${reason}` : "试跑");
+      outlet.querySelector(".am-trial-hint").textContent = reason ? `暂不可试跑：${reason}` : "";
+    }
+    const parse = outlet.querySelector('[data-action="mod-parse-calculations"]');
+    if (parse) parse.disabled = !module.goal || !module.reasoning.trim() || !calculationCandidates(store, module).some(candidate => candidate.selected);
     const publish = outlet.querySelector('[data-action="mod-publish"]');
     if (publish) publish.disabled = running || calculatedMetricIssues(store, module).length > 0;
     const h1 = outlet.querySelector(".am-heading-line h1");
@@ -327,12 +413,13 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
   function refreshSelection(source) {
     const card = outlet.querySelector(`.am-source-card[data-source-id="${source.id}"]`), definition = sourceDefinition(store, source);
     refreshReportOrder();
-    card.querySelector(".am-selected-count").textContent = `已选 ${source.metricKeys.length} 个指标${definition.dimensions.length ? ` · ${source.dimensionKeys.length} 个维度` : ""}`;
+    card.querySelector(".am-selected-count").textContent = `已选 ${source.metricKeys.length} 个指标${definition.dimensions.length ? ` · ${source.dimensionKeys.length} 个取数维度` : ""}`;
+    card.querySelector(".am-source-summary").innerHTML = sourceSummary(source, false);
     for (const [kind, fields, selected] of [["metric", definition.metrics, source.metricKeys], ["dimension", definition.dimensions, source.dimensionKeys]]) {
       const column = card.querySelector(`.am-choice-column.${kind}`);
-      column.querySelector(".am-choice-count").textContent = `已选 ${selected.length}/${fields.length}`;
+      column.querySelector(".am-choice-count").textContent = `已选 ${selected.length} / ${fields.length}`;
       const all = column.querySelector('[data-action="mod-all"]');
-      if (all) all.textContent = selected.length === fields.length ? "清空" : "全选";
+      if (all) all.textContent = kind === "dimension" && fields.some(isOverall) ? "仅保留整体" : selected.length === fields.length ? "清空" : "全选";
       column.querySelectorAll("input[type=checkbox]").forEach((input) => { input.checked = selected.includes(input.value); });
     }
     const sourceTrial = card.querySelector('[data-action="mod-trial-source"]');
@@ -340,7 +427,7 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       || moduleIssues(store, { ...store.analysis, name: store.analysis.name || "新模块" }, [source], { sourceTrial: true }).length > 0;
     refreshCalculationIssues();
   }
-  const touch = () => { pruneModuleReportOrder(store.analysis); store.analysis.updatedAt = new Date().toISOString(); persist(); };
+  const touch = () => { pruneModuleReportOrder(store.analysis); pruneModuleBars(store, store.analysis); store.analysis.updatedAt = new Date().toISOString(); persist(); };
   async function startTrial(sourceId = "") {
     if (running) return;
     running = true;
@@ -382,6 +469,8 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
         updatedAt: new Date().toISOString(), versions: [], attempts: [], multiAttempts: [], enabled: true, archived: false });
       const remapped = copyModuleSources(original);
       copy.sources = remapped.sources; copy.calculatedMetrics = remapped.calculatedMetrics;
+      copy.reportDataBars = remapped.reportDataBars;
+      pruneModuleBars(store, copy);
       if (remapped.reportOrder) copy.reportOrder = remapped.reportOrder;
       store.modules.push(copy); store.analysis = copy; persist(); location.hash = `/modules/${copy.id}`; return;
     }
@@ -395,6 +484,35 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       persist(); closeDialog(); render(); showToast("模块已归档"); return;
     }
     if (action === "cancel") { closeDialog(); return; }
+    if (action === "clear-goal") {
+      module.goal = ""; touch();
+      const fields = outlet.querySelector(".am-goal-fields");
+      fields.innerHTML = goalFields(module); refreshSources();
+      fields.querySelector("select")?.focus({ preventScroll: true }); return;
+    }
+    if (action === "parse-calculations") {
+      const parsed = parseCalculationNotes(module.reasoning, calculationCandidates(store, module));
+      const names = new Set(module.calculatedMetrics.map(metric => metric.name.trim().toLowerCase()));
+      const additions = parsed.filter(metric => {
+        const name = metric.name.toLowerCase();
+        if (names.has(name)) return false;
+        names.add(name); return true;
+      });
+      if (!additions.length) {
+        showToast(parsed.length ? "识别到的计算指标已存在" : "未识别到可用公式，请用「指标名 = 已选指标 ÷ 已选指标」的格式"); return;
+      }
+      module.calculatedMetrics.push(...additions);
+      configurationTabs.set(module.id, "calculated");
+      touch(); refreshCalculations();
+      outlet.querySelector(`[data-calculation-key="${additions[0].key}"] input`)?.focus();
+      showToast(`已生成 ${additions.length} 个计算指标`); return;
+    }
+    if (action === "recommend-bars") {
+      const recommended = recommendReportBars(module.reasoning, moduleBarCandidates(store, module));
+      if (!recommended.length) { refreshVisualization("没有匹配到明确的指标，请手动选择。"); return; }
+      module.reportDataBars = recommended;
+      touch(); refreshActions(); refreshVisualization(`已推荐并勾选 ${recommended.length} 项，可继续调整。`); return;
+    }
     if (action === "configuration-tab") {
       configurationTabs.set(module.id, trigger.dataset.tab);
       refreshConfigurationVisibility(); return;
@@ -450,6 +568,7 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
     if (action === "publish") {
       errors = moduleIssues(store, module);
       if (errors.length) { renderEditor(module.id); return; }
+      pruneModuleBars(store, module);
       if (module.versions.at(-1)?.signature === moduleHash(module)) { showToast("当前配置已经发布"); return; }
       module.key ||= uid("analysis_module"); module.savedAt = new Date().toISOString();
       module.versions.push({ number: module.versions.length + 1, publishedAt: module.savedAt,
@@ -476,7 +595,8 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       const kind = trigger.dataset.kind, definition = sourceDefinition(store, source);
       const key = kind === "metric" ? "metricKeys" : "dimensionKeys";
       const fields = kind === "metric" ? definition.metrics : definition.dimensions;
-      source[key] = source[key].length === fields.length ? [] : fields.map((field) => field.key);
+      const overall = kind === "dimension" ? fields.filter(isOverall) : [];
+      source[key] = overall.length ? overall.map(field => field.key) : source[key].length === fields.length ? [] : fields.map(field => field.key);
       touch(); refreshSelection(source); return;
     }
     if (action === "trial" || action === "trial-source") {
@@ -501,6 +621,24 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
     if (model === "mod-page-size") { pageSize = Number(el.value); page = 1; renderListResults(); return true; }
     if (model === "mod-state" || model === "mod-sort" || model === "mod-type") { if (model === "mod-state") state = el.value; else if (model === "mod-type") type = el.value; else sort = el.value; page = 1; renderListResults(); return true; }
     const module = store.analysis;
+    if (model === "mod-observation-anchor") {
+      module.observation = { anchor: el.value, days: module.observation?.days ?? 0 };
+      touch(); refreshActions();
+      const fields = outlet.querySelector(".am-observation-fields");
+      fields.innerHTML = observationFields(module); createIcons({ icons });
+      fields.querySelector('input, select')?.focus({ preventScroll: true }); return true;
+    }
+    if (model === "mod-observation-days") {
+      module.observation.days = el.value === "" ? null : Number(el.value);
+      touch(); refreshActions(); return true;
+    }
+    if (model === "mod-bar-metric") {
+      const candidates = moduleBarCandidates(store, module), ids = reportBarIds(module);
+      if (el.checked) ids.add(el.value); else ids.delete(el.value);
+      module.reportDataBars = candidates.filter(({ sourceId, key }) => ids.has(reportBarId(sourceId, key)))
+        .map(({ sourceId, key }) => ({ sourceId, key }));
+      touch(); refreshActions(); updateVisualizationSelection(el.closest(".am-visualization"), candidates, ""); return true;
+    }
     if (model === "mod-calc-search") {
       const picker = el.closest(".am-calc-picker"), query = el.value.trim().toLowerCase();
       picker.querySelectorAll("[data-search]").forEach(option => { option.hidden = !option.dataset.search.includes(query); });
@@ -525,9 +663,29 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       const key = model.slice(10);
       if (key.startsWith("context:")) module.context[key.slice(8)] = el.value;
       else module[key] = el.value;
-      touch(); if (key === "analysisType") refreshSources(); else refreshActions(); return true;
+      touch();
+      if (key === "goal") {
+        const fields = outlet.querySelector(".am-goal-fields");
+        fields.innerHTML = goalFields(module);
+        refreshSources(); fields.querySelector("select")?.focus({ preventScroll: true });
+      } else if (key === "analysisType") refreshSources();
+      else refreshActions();
+      if (key === "reasoning") {
+        const region = outlet.querySelector(".am-visualization"), candidates = moduleBarCandidates(store, module);
+        if (region) {
+          region.querySelector('[data-action="mod-recommend-bars"]').disabled = !candidates.length || !module.reasoning.trim();
+          updateVisualizationSelection(region, candidates, "");
+        }
+      }
+      return true;
     }
-    if (model === "mod-apps") { module.apps = el.value.split(",").filter(Boolean); touch(); return true; }
+    if (model === "mod-app-choice") {
+      module.apps = appOptions.filter(app => app === el.value ? el.checked : module.apps.includes(app));
+      const summary = el.closest("details").querySelector("summary > span");
+      summary.textContent = module.apps.join("、") || "不选择表示不限端";
+      summary.classList.toggle("am-placeholder", !module.apps.length);
+      touch(); refreshActions(); return true;
+    }
     if (model === "mod-option-search") {
       outlet.querySelectorAll(".am-picker-option").forEach((option) => { option.hidden = !option.dataset.optionName.toLowerCase().includes(el.value.toLowerCase()); }); return true;
     }
@@ -540,9 +698,9 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       } else module.sources = module.sources.filter((source) => optionKey(source) !== el.value);
       touch();
       // Keep the multiple selection menu open and its search while updating selected cards.
-      const menu = outlet.querySelector(".am-multi-select"), query = menu.querySelector('input[type="search"]').value;
+      const menu = el.closest(".am-multi-select"), query = menu.querySelector('input[type="search"]').value;
       refreshSources();
-      const next = outlet.querySelector(".am-multi-select"); next.open = true;
+      const next = outlet.querySelector(".am-source-picker .am-multi-select"); next.open = true;
       const input = next.querySelector('input[type="search"]'); input.value = query;
       next.querySelectorAll(".am-picker-option").forEach((option) => { option.hidden = !option.dataset.optionName.toLowerCase().includes(query.toLowerCase()); });
       next.querySelector(`input[value="${el.value}"]`)?.focus({ preventScroll: true });
@@ -564,7 +722,7 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
     return true;
   }
   document.addEventListener("pointerdown", (event) => {
-    outlet.querySelectorAll(".am-multi-select[open]").forEach((menu) => { if (!menu.contains(event.target)) menu.open = false; });
+    outlet.querySelectorAll(".am-multi-select[open], .am-field-help[open]").forEach((menu) => { if (!menu.contains(event.target)) menu.open = false; });
   });
   const clearOrderDrag = () => {
     outlet.querySelectorAll(".am-order-dragging, .am-order-drop-target").forEach(el => el.classList.remove("am-order-dragging", "am-order-drop-target"));
@@ -607,6 +765,13 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
   });
   outlet.addEventListener("dragend", clearOrderDrag);
   outlet.addEventListener("keydown", (event) => {
+    const details = event.target.closest(".am-multi-select[open], .am-field-help[open]");
+    if (event.key === "Escape" && details) {
+      event.preventDefault();
+      details.open = false;
+      details.querySelector("summary").focus();
+      return;
+    }
     const tab = event.target.closest('.am-configuration-tabs [role="tab"]');
     if (tab && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       event.preventDefault();

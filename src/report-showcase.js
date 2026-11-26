@@ -4,6 +4,7 @@ import {
   showcase, denominator, finite, contribution, shareEvidence, topContributors, topShare, youngShare,
   barDomain, barGeometry, normalizeReading, readingState, saveReading, visibleRows
 } from "./report-showcase-data.js";
+import { dataBarAttributes } from "./report-table-formatting.js";
 
 const SUMMARY = "sv-summary", OVERALL = "sv-overall", SEGMENTS = "sv-segments";
 const esc = value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
@@ -77,13 +78,11 @@ const columns = [
   { id: "gmv", label: "人均支付 GMV", digits: 4, currency: true, lift: "gmvLift", significance: "gmvSignificance" },
   { id: "gmvDelta", label: "增量支付 GMV", digits: 0, currency: true }
 ];
-function metricCell(row, column, state) {
+function metricCell(row, column) {
   if (column.id === "share") {
     const evidence = shareEvidence(row), domain = barDomain(showcase.rows.map(item => contribution(item.delta)));
-    const geometry = barGeometry(evidence.value, domain);
     return `<div class="sv-share-value" title="${esc(evidence.formula)}；${number(evidence.numerator)} ÷ ${number(evidence.denominator)}" data-sv-numerator="${row.delta}" data-sv-denominator="${denominator}">
-      ${state.dataBars && geometry ? `<span class="sv-data-bar" aria-hidden="true" style="left:${geometry.left}%;width:${geometry.width}%"></span>` : ""}
-      <span>${percent(evidence.value)}</span></div>`;
+      <span${dataBarAttributes(evidence.value, domain)}>${percent(evidence.value)}</span></div>`;
   }
   const value = row[column.id];
   const formatted = column.id === "gmvDelta" ? row.gmvDeltaDisplay : `${column.currency && finite(value) ? "￥" : ""}${number(value, column.digits)}`;
@@ -165,7 +164,6 @@ function segmentsHTML(state, title = "电商人群贡献", order = "03") {
       <div class="sv-data-heading"><h3>数据明细</h3><span class="sv-group-label">${showcase.group}</span><span class="grow"></span>${action("reset", `${icon("reset")}恢复默认`, "", "sv-reset")}<button type="button" class="sv-button" data-fs="${SEGMENTS}" aria-label="切换数据明细与贡献图全屏">${icon("expand")}<span class="sv-enter-fs">全屏</span><span class="sv-leave-fs">退出全屏</span></button></div>
       <div class="sv-controls">
         <label class="sv-sort">排序<select data-sv-control="sort" aria-label="表格与图表排序"><option value="desc" ${state.sort === "desc" ? "selected" : ""}>贡献从高到低</option><option value="asc" ${state.sort === "asc" ? "selected" : ""}>贡献从低到高</option><option value="source" ${state.sort === "source" ? "selected" : ""}>原始顺序</option></select></label>
-        <label class="sv-check"><input type="checkbox" data-sv-control="bars" ${state.dataBars ? "checked" : ""}>占比数据条</label>
         ${action("transpose", `${icon("transpose")}转置`, `aria-pressed="${state.transposed}"`)}
         <span class="grow"></span><span class="sv-count" aria-live="polite">${rows.length} / ${showcase.rows.length} 个人群</span>
       </div>
@@ -211,7 +209,6 @@ export function showcaseEvent(event, view) {
   let focus = control ? `[data-sv-control="${control}"]${id ? `[data-sv-id="${id}"]` : ""}`
     : `[data-sv-action="${actionName}"]${metric ? `[data-sv-metric="${metric}"]` : ""}`;
   if (control === "sort" && ["desc", "asc", "source"].includes(target.value)) state.sort = target.value;
-  else if (control === "bars") state.dataBars = target.checked;
   else if (control === "population" && showcase.rows.some(row => row.id === id)) {
     state.visible = showcase.rows.filter(row => row.id === id ? target.checked : state.visible.includes(row.id)).map(row => row.id);
     if (!state.visible.includes(state.selected)) state.selected = null;

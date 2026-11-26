@@ -4,6 +4,7 @@ import { sourceDefinition, moduleIssues, moduleConfiguration } from "./analysis-
 import { computeModuleCalculations, localCalculationContext, comparisonCalculationRecords } from "./analysis-module-calculation-runtime.js";
 import { findExperiment, experimentInput, experimentIssues, deriveGroup, deriveBreakdowns } from "./multi-experiment-data.js";
 import { applyModuleRecordOrder } from "./analysis-module-report-order.js";
+import { moduleObservationInput } from "./analysis-module-observation.js";
 
 function fixedRpcRecords(store, module, source) {
   const definition = sourceDefinition(store, source);
@@ -86,9 +87,20 @@ export async function runModule(store, module, changed, sourceId = "") {
   };
   module.attempts.unshift(attempt); changed(attempt);
   try {
+    let shortened = false;
+    if (snapshot.observation?.anchor && snapshot.observation.anchor !== "follow") {
+      const original = snapshot.context;
+      const observed = moduleObservationInput(snapshot, { start: original.start_date, end: original.end_date },
+        findExperiment(String(original.libra_id)));
+      if (observed.error) throw new Error(observed.error);
+      shortened = observed.input.end !== original.end_date;
+      snapshot.context.end_date = observed.input.end;
+    }
     for (const source of sources) {
       const definition = sourceDefinition(store, source);
       if (source.kind === "rpc") {
+        if (shortened && source.capabilityId !== "demo-comparison")
+          throw new Error(`${definition.name}的固定样例未提供缩短后观测区间的结果。`);
         if (snapshot.scenario !== "normal") throw new Error("内置 RPC 固定样例仅支持正常场景。");
         const records = fixedRpcRecords(store, snapshot, source);
         attempt.records.push(...records);

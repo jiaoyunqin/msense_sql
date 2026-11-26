@@ -4,6 +4,7 @@ import { validateCalculatedMetrics } from "./analysis-module-calculations.js";
 import { localCalculationContext } from "./analysis-module-calculation-runtime.js";
 import { findExperimentResult, reportExperimentKey, selectedCandidateId, repeatedLibraId, experimentLabel } from "./experiment-identity.js";
 import { applyModuleDatasetOrder } from "./analysis-module-report-order.js";
+import { moduleObservationResult } from "./analysis-module-observation.js";
 
 export const matrixPresentation = "matrix-demo-v1";
 const clone = value => structuredClone(value);
@@ -205,6 +206,8 @@ export function captureMatrixSnapshot(report) {
     ? { ...entry, requiresCandidateIdentity: true } : entry);
   return report.snapshot.modules.map(module => {
     const datasets = [], issues = [];
+    const moduleEntries = entries.map(entry => moduleObservationResult(module, entry,
+      findExperimentResult(report.results, entry, report.snapshot) || { status: "failed" }));
     for (const source of module.configuration.sources.filter(source => source.showInReport)) {
       const registration = registrations[source.capabilityId];
       if (!registration || !source.dimensionKeys.includes(registration.mode)) {
@@ -212,8 +215,8 @@ export function captureMatrixSnapshot(report) {
       }
       const fields = registration.fields.filter(field => source.metricKeys.includes(field.key));
       if (!fields.length) continue;
-      if (source.capabilityId === couponIntervalCapability && !entries.some(entry => {
-        const rows = findExperimentResult(report.results, entry, report.snapshot)?.couponIntervals?.overall;
+      if (source.capabilityId === couponIntervalCapability && !moduleEntries.some(({ entry, result }) => {
+        const rows = result.couponIntervals?.overall;
         return Array.isArray(rows) && rows.some(row => savedGroups(entry, registration).some(group => group.id === row.groupId));
       })) {
         issues.push(`${source.definition?.name || source.id}：快照未保存可对齐的整体核销间隔`);
@@ -225,14 +228,13 @@ export function captureMatrixSnapshot(report) {
         sourceId: source.id, sourceName: source.definition?.name || source.id, mode: registration.mode,
         title: source.capabilityId === couponIntervalCapability ? "领券核销间隔（整体）" : "核心指标（整体）",
         contract: semantics, fields: clone(fields),
-        experiments: entries.map(entry => {
-          const result = findExperimentResult(report.results, entry, report.snapshot) || { status: "failed" };
+        experiments: moduleEntries.map(({ entry, result }) => {
           return { id: reportExperimentKey(report.snapshot, entry), contract: clone(semantics), reason,
             rows: rawSourceRows(result, entry, source, registration, fields) };
         }) });
     }
-    const calculations = module.configuration.calculatedMetrics?.some(metric => metric.showInReport) ? entries.flatMap(entry =>
-      (findExperimentResult(report.results, entry, report.snapshot)?.moduleCalculations?.[module.id]?.records || [])
+    const calculations = module.configuration.calculatedMetrics?.some(metric => metric.showInReport) ? moduleEntries.flatMap(({ entry, result }) =>
+      (result.moduleCalculations?.[module.id]?.records || [])
         .map(record => ({ record, entry }))) : [];
     const modes = [...new Set(calculations.filter(({ record }) => record.modeId === "overall").map(({ record }) => record.modeId))];
     for (const mode of modes) {
@@ -246,8 +248,7 @@ export function captureMatrixSnapshot(report) {
         sourceId: "module-calculations", sourceName: "当前分析模块计算结果", mode: `calculated:${mode}`,
         title: "计算指标（整体）", contract: semantics,
         fields: fields.map(field => ({ ...clone(field), unit: field.format === "percent" ? "%" : "", digits: field.precision })),
-        experiments: entries.map(entry => {
-          const result = findExperimentResult(report.results, entry, report.snapshot);
+        experiments: moduleEntries.map(({ entry, result }) => {
           const matches = result?.moduleCalculations?.[module.id]?.records.filter(record => record.modeId === mode) || [];
           const record = matches.length === 1 ? matches[0] : null;
           const actualFields = record?.fields.filter(field => field.calculated && field.showInReport) || [];
@@ -379,7 +380,7 @@ export function buildMatrixTables(datasets) {
     members.forEach(member => member.fields.forEach(field => counts.set(field.key, (counts.get(field.key) || 0) + 1)));
     const fields = members.flatMap(member => member.fields.map(field => ({ ...field,
       viewKey: counts.get(field.key) > 1 ? identity(member.key, field.key) : field.key,
-      datasetKey: member.key })));
+      datasetKey: member.key, sourceId: member.sourceId })));
     const memberColumns = new Map(members.map(member => [member.key, new Map(member.columns.map(column => [column.key, column]))]));
     const columnsByExperiment = new Map();
     members.forEach(member => member.columns.forEach(column => {

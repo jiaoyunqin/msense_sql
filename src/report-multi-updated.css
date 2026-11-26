@@ -43,8 +43,6 @@
   :is(.mx-cell, .mm-cell) .cf-change-up { color: var(--cf-trend-green); }
   :is(.mx-cell, .mm-cell) .cf-change-down { color: var(--cf-trend-red); }
   :is(.mx-cell, .mm-cell) .cf-change-muted { color: var(--muted); }
-  [data-cf-trend-palette="red-up"] .cf-change-up { color: var(--cf-trend-red); }
-  [data-cf-trend-palette="red-up"] .cf-change-down { color: var(--cf-trend-green); }
   .mm-cell > small { text-align: right; }
   .mm-cell .mm-sig { padding: 0; background: transparent; }
   @media (max-width: 640px) {

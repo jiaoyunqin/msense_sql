@@ -1,6 +1,17 @@
 import source from "./report-complete-data.json";
 
 export const completeSource = source;
+// This bundled report has no published module snapshot; use its own fixed sample selections.
+export function completeBarMetrics(module) {
+  if (["report-module-10", "report-module-11", "report-module-12", "report-module-13", "report-module-14"].includes(module.id))
+    return ["增量累计DAC", "GMV-ROI"];
+  if (["report-module-16", "report-module-17"].includes(module.id)) return ["核销率", "钱效"];
+  if (["report-module-18", "report-module-19", "report-module-20"].includes(module.id)) return ["核销用户数", "钱效"];
+  if (module.id === "report-module-28") return ["领券核销间隔均值", "领券核销间隔P50"];
+  if (["report-module-29", "report-module-30"].includes(module.id)) return ["用户数"];
+  if (["report-module-26", "report-module-27"].includes(module.id)) return ["跃迁率", "保持率"];
+  return [];
+}
 export const moduleScope = module => `cf-${module.id}`;
 export const summaryScope = "cf-summary";
 export const rowGroup = row => row.cells[0].text.replace(/\s+/g, " ").trim();

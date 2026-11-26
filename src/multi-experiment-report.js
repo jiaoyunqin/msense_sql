@@ -7,7 +7,7 @@ import { experimentLabel, reportExperimentKey, reportExperimentLabel, repeatedLi
 import { buildMultiReportSummary } from "./multi-report-summary.js";
 import { renderReportSummary, reportSummaryText } from "./report-summary.js";
 import { renderConclusionText, generatedConclusionAnnotations } from "./report-conclusion-emphasis.js";
-import { detailTable, detailReading, detailFields, detailRecords, detailFormat, detailControls, detailPanel, detailHeading, detailSortAria, detailValue, detailComparison, detailEvent } from "./report-detail-tools.js";
+import { detailTable, detailReading, detailFields, detailRecords, detailControls, detailHeading, detailSortAria, detailValue, detailComparison, detailEvent } from "./report-detail-tools.js";
 
 import { directoryHeading } from "./report-directory-data.js";
 const esc = value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
@@ -80,29 +80,28 @@ function conclusionHTML(title, messages, scope) {
   return `<div class="ccard mm-conclusion" data-card="${scope}"><div class="ccard-h"><span class="t">${svg("chart")}${title}</span><span class="grow"></span>${ai(scope)}</div>
     ${messages.length ? `<div class="cf-prose"><ul>${messages.map(message => `<li>${renderConclusionText(message, generatedConclusionAnnotations(message, scope))}</li>`).join("")}</ul></div>` : '<p class="mm-muted">当前没有可用分析结论。</p>'}</div>`;
 }
-function cellHTML(cell, model, field, format) {
+function cellHTML(cell, model, field) {
   const title = cell.reason || (cell.raw != null ? `原值：${cell.raw}${cell.control != null ? `；自身对照组：${cell.control}` : ""}` : cell.text);
-  return `<div class="mm-cell" title="${esc(title)}">${detailValue(cell.text, cell.missing ? null : cell.raw, model, field, format)}${detailComparison(cell, format)}
+  return `<div class="mm-cell" title="${esc(title)}">${detailValue(cell.text, cell.missing ? null : cell.raw, model, field)}${detailComparison(cell)}
     ${cell.missing && cell.reason ? `<small class="mm-missing">${esc(cell.reason)}</small>` : ""}</div>`;
 }
 function datasetHTML(module, experiment, dataset, datasetIndex, view, scopedToExperiment = false, reportView = {}) {
   const id = datasetScope(module.index, datasetIndex, scopedToExperiment ? experiment.id : ""), key = `${experiment.id}:${datasetIndex}`;
   const state = view.tables[key] ||= { group: "all", transposed: false };
   const model = detailTable(module, `${module.id}-single-${module.experiments.indexOf(experiment)}-${datasetIndex}`, dataset);
-  const order = detailReading(reportView, model), format = detailFormat(reportView, model), fields = detailFields(model, order);
+  const order = detailReading(reportView, model), fields = detailFields(model, order);
   const groups = [...new Map(dataset.records.map(record => [record.groupId, record.groupName])).entries()];
   const rows = detailRecords(model, order, dataset.records.filter(record => state.group === "all" || record.groupId === state.group));
   const table = state.transposed
-    ? `<table class="mm-table" data-cf-trend-palette="${format.trendPalette}"><thead><tr><th class="mm-fixed">字段 / 数据</th>${rows.map(row => `<th>${esc(row.label)}${dataset.mode === "demo-spend" ? `<small>${esc(row.groupName)}</small>` : ""}</th>`).join("")}</tr></thead><tbody>${fields.map(field =>
-      `<tr data-bid="${field.key}"><th class="mm-fixed" scope="row"${detailSortAria(field, order)} title="${esc(field.formulaText || field.description || "")}">${detailHeading(model, field, order)}</th>${rows.map(row => `<td>${cellHTML(row.cells[dataset.fields.indexOf(field)], model, field, format)}</td>`).join("")}</tr>`).join("")}</tbody></table>`
-    : `<table class="mm-table" data-cf-trend-palette="${format.trendPalette}"><thead><tr><th class="mm-fixed">${dataset.firstColumn}</th>${fields.map(field => `<th${detailSortAria(field, order)} title="${esc(field.formulaText || field.description || "")}">${detailHeading(model, field, order)}</th>`).join("")}</tr></thead><tbody>${rows.map(row =>
-      `<tr data-bid="${row.id}"><th class="mm-fixed" scope="row">${esc(row.label)}${dataset.dimensioned || dataset.mode === "demo-spend" ? `<small>${esc(row.groupName)}</small>` : row.control ? '<small class="mm-control">对照组</small>' : ""}</th>${fields.map(field => `<td>${cellHTML(row.cells[dataset.fields.indexOf(field)], model, field, format)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+    ? `<table class="mm-table"><thead><tr><th class="mm-fixed">字段 / 数据</th>${rows.map(row => `<th>${esc(row.label)}${dataset.mode === "demo-spend" ? `<small>${esc(row.groupName)}</small>` : ""}</th>`).join("")}</tr></thead><tbody>${fields.map(field =>
+      `<tr data-bid="${field.key}"><th class="mm-fixed" scope="row"${detailSortAria(field, order)} title="${esc(field.formulaText || field.description || "")}">${detailHeading(model, field, order)}</th>${rows.map(row => `<td>${cellHTML(row.cells[dataset.fields.indexOf(field)], model, field)}</td>`).join("")}</tr>`).join("")}</tbody></table>`
+    : `<table class="mm-table"><thead><tr><th class="mm-fixed">${dataset.firstColumn}</th>${fields.map(field => `<th${detailSortAria(field, order)} title="${esc(field.formulaText || field.description || "")}">${detailHeading(model, field, order)}</th>`).join("")}</tr></thead><tbody>${rows.map(row =>
+      `<tr data-bid="${row.id}"><th class="mm-fixed" scope="row">${esc(row.label)}${dataset.dimensioned || dataset.mode === "demo-spend" ? `<small>${esc(row.groupName)}</small>` : row.control ? '<small class="mm-control">对照组</small>' : ""}</th>${fields.map(field => `<td>${cellHTML(row.cells[dataset.fields.indexOf(field)], model, field)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
   return `<section class="sec mm-dataset tblock" id="sec-${id}" data-sec="${id}" aria-label="${esc(dataset.title)}" data-dataset-index="${datasetIndex}">
     <div class="tblock" id="tb-${id}"><h3 class="mm-dataset-title">${esc(dataset.title)}</h3>
       <div class="mm-table-toolbar"><div class="mm-group-tabs" role="tablist" aria-label="${esc(dataset.title)}实验组">
         ${[["all", "全部"], ...groups].map(([groupId, name]) => `<button type="button" role="tab" aria-selected="${state.group === groupId}" class="${state.group === groupId ? "on" : ""}" data-mm-group="${esc(groupId)}" data-mm-module="${module.id}" data-mm-experiment="${experiment.id}" data-mm-table="${datasetIndex}">${esc(name)}</button>`).join("")}
-      </div><div class="mm-table-tools"><small>${rows.length} 条数据</small>${detailControls(reportView, model)}<button class="btn-o sm" type="button" data-mm-transpose data-mm-module="${module.id}" data-mm-experiment="${experiment.id}" data-mm-table="${datasetIndex}" aria-pressed="${state.transposed}">⇄ 转置</button><button class="btn-o sm" type="button" data-fs="${id}">⛶ 全屏</button></div></div>
-      ${detailPanel(reportView, model, format)}
+      </div><div class="mm-table-tools"><small>${rows.length} 条数据</small>${detailControls(model)}<button class="btn-o sm" type="button" data-mm-transpose data-mm-module="${module.id}" data-mm-experiment="${experiment.id}" data-mm-table="${datasetIndex}" aria-pressed="${state.transposed}">⇄ 转置</button><button class="btn-o sm" type="button" data-fs="${id}">⛶ 全屏</button></div></div>
       <div class="tbl-wrap mm-table-scroll" tabindex="0" aria-label="${esc(dataset.title)}，可横向滚动">${table}</div>
       ${dataset.calculated ? `<details class="mm-notes"><summary>计算公式与输入来源</summary><ul>${dataset.fields.map(field =>
         `<li>${esc(field.name)}：${esc(field.formulaText)}；${field.sources.map(source => `${esc(source.sourceName)} v${source.ref.version}`).join("、")}</li>`).join("")}</ul></details>` : ""}

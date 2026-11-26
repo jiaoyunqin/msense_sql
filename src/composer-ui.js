@@ -1,4 +1,6 @@
 import { createIcons, icons } from "lucide";
+import { reportBarId, reportBarIds } from "./analysis-module-visualization.js";
+import { dataBarAttributes, dataBarMetricName, positiveBarMaximum } from "./report-table-formatting.js";
 import { catalogPerson, catalogPeople } from "./capability-site-data.js";
 import {
   clone, uid, COMPOSER_KEY, loadComposer, newItem, newAbility, makeReference, resolveItem,
@@ -60,9 +62,19 @@ function syntax(sql) {
   }
   return html + esc(sql.slice(cursor)) + "\n";
 }
-function table(record, highlight = -1) {
+function table(record, highlight = -1, visualization) {
   if (!record?.rawRows?.length) return `<div class="p-empty">${icon("table-2")}<p>${record?.status === "empty" ? "本次执行返回 0 行，请核对筛选条件。" : "本次尚无可用数据。"}</p></div>`;
-  return `<div class="p-table-scroll"><table class="p-table"><thead><tr><th>行</th>${record.fields.map((f) => `<th title="${esc(f.formulaText || "")}">${esc(f.name)}<small>${esc(f.calculated ? f.formulaText : f.key)}</small></th>`).join("")}</tr></thead><tbody>${record.rawRows.map((r, i) => `<tr id="evidence-${i}" class="${i === highlight ? "evidence-row" : ""}"><td>${i + 1}</td>${record.fields.map((f) => `<td title="${esc(r.calculationReasons?.[f.key] || `原值：${r[f.alias] === null ? "NULL" : r[f.alias]}`)}">${esc(f.calculated ? formatCalculatedValue(r[f.alias], f) : f.valueLabels?.[r[f.alias]] ?? formatValue(r[f.alias], f, r))}${f.calculated && r.calculationReasons?.[f.key] ? `<small class="p-calculation-reason">${esc(r.calculationReasons[f.key])}</small>` : ""}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+  const selectedBars = reportBarIds(visualization);
+  const domains = new Map(record.fields.filter(f => f.role === "metric" && dataBarMetricName(f.name)
+    && selectedBars.has(reportBarId(record.sourceId, f.key))).map(f =>
+    [f.key, { max: positiveBarMaximum(record.rawRows.map(row => row[f.alias])) }]));
+  const cell = (row, field) => {
+    const raw = row[field.alias], reason = row.calculationReasons?.[field.key];
+    const text = esc(field.calculated ? formatCalculatedValue(raw, field) : field.valueLabels?.[raw] ?? formatValue(raw, field, row));
+    const bar = dataBarAttributes(raw, domains.get(field.key));
+    return `<td title="${esc(reason || `原值：${raw === null ? "NULL" : raw}`)}">${bar ? `<span${bar}>${text}</span>` : text}${field.calculated && reason ? `<small class="p-calculation-reason">${esc(reason)}</small>` : ""}</td>`;
+  };
+  return `<div class="p-table-scroll"><table class="p-table"><thead><tr><th>行</th>${record.fields.map((f) => `<th title="${esc(f.formulaText || "")}">${esc(f.name)}<small>${esc(f.calculated ? f.formulaText : f.key)}</small></th>`).join("")}</tr></thead><tbody>${record.rawRows.map((r, i) => `<tr id="evidence-${i}" class="${i === highlight ? "evidence-row" : ""}"><td>${i + 1}</td>${record.fields.map(f => cell(r, f)).join("")}</tr>`).join("")}</tbody></table></div>`;
 }
 const section = (title, desc, body, actions = "", id = "", cls = "") => `<section class="p-section${cls ? ` ${cls}` : ""}" ${id ? `id="${id}"` : ""}><header><div><h2>${title}</h2>${desc ? `<p>${desc}</p>` : ""}</div><div class="p-actions">${actions}</div></header>${body}</section>`;
 
@@ -1259,7 +1271,7 @@ export function mountComposer({ capabilities, showToast, applyPresetSelection })
     outlet.innerHTML = header(`${a.capabilityName} · ${a.sourceTrial ? "取数试跑" : "分析试跑"}`, `${date(a.startedAt)} · ${a.id}`, btn("back-modules", "返回分析配置", "arrow-left"), "分析模块", `#/modules/${store.analysis.id}`)
       + `<div class="p-analysis-meta">${badge(statuses[a.status], a.status === "success" ? "green" : "amber")}${badge(current ? "当前配置" : "历史配置快照")}${badge(`Libra ${a.snapshot.context.libra_id}`)}${badge(`${a.snapshot.context.start_date} 至 ${a.snapshot.context.end_date}`)}</div><div class="p-mode-tabs">${btn("analysis-output", "分析输出", "file-text", analysisTab === "output" ? "active" : "")}${btn("analysis-input", "输入数据与证据", "table-2", analysisTab === "input" ? "active" : "")}</div>`
       + (analysisTab === "output" ? section("分析输出", "仅描述实际输入中的组间数值。", a.status === "running" ? `<div class="p-progress"><span></span>正在检查输入并生成证据…</div>` : `<div class="p-conclusions">${a.evidence.map((e) => `<article><div>${icon("chart-no-axes-combined")}<p>${esc(e.text)}</p></div>${btn("evidence", "查看数据证据", "arrow-up-right", "link", `data-execution="${e.executionId}" data-row="${e.rowIndex}"`)}</article>`).join("")}</div><div class="p-analysis-gaps"><h3>判断边界</h3>${a.gaps.map((g) => `<p>${icon("info")}${esc(g)}</p>`).join("")}</div>`)
-        : section("本次输入数据", "", `<div class="p-mode-tabs">${a.records.map((r) => btn("analysis-record", esc(r.modeName), "", r === record ? "active" : "", `data-id="${r.id}"`)).join("")}</div>${record ? table(record, highlight) + (record.calculated
+        : section("本次输入数据", "", `<div class="p-mode-tabs">${a.records.map((r) => btn("analysis-record", esc(r.modeName), "", r === record ? "active" : "", `data-id="${r.id}"`)).join("")}</div>${record ? table(record, highlight, a.sourceTrial ? undefined : a.snapshot) + (record.calculated
           ? `<details class="p-snapshot"><summary>计算公式与输入来源</summary>${record.fields.filter(field => field.calculated).map(field => `<p>${esc(field.name)}：${esc(field.formulaText)}；${field.sources.map(source => `${esc(source.sourceName)} v${source.ref.version}`).join("、")}</p>`).join("")}</details>`
           : `<details class="p-snapshot"><summary>查看执行 SQL</summary><pre>${esc(record.renderedSql || "")}</pre></details>`) : `<div class="p-empty">尚无可用输入。</div>`}`));
     refreshIcons();

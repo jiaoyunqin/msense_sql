@@ -8,6 +8,7 @@ import { preAAMetrics, createPreAAEvidence, preAADataset, preAASingleSummary } f
 import { captureMatrixSnapshot, matrixPresentation } from "./matrix-report-data.js";
 import { findExperimentResult, reportExperimentKey, reportExperimentLabel, experimentLabel, selectedCandidateId } from "./experiment-identity.js";
 import { applyModuleDatasetOrder } from "./analysis-module-report-order.js";
+import { moduleObservationResult } from "./analysis-module-observation.js";
 
 const metric = key => comparisonMetrics.find(field => field.key === key);
 const fmt = (value, key) => formatMetric(value, metric(key) || { digits: 2 });
@@ -41,7 +42,8 @@ function coreDataset(source, result, entry, mode) {
     records.unshift({ id: row.controlId, groupId: row.controlId, groupName: row.controlName,
       label: row.controlName, control: true, cells: fields.map(field => {
         if (field.key === "dac" || field.key === "gmv")
-          return numericCell(row.raw[field.key === "dac" ? "controlDac" : "controlGmv"], field);
+          return { ...numericCell(row.raw[field.key === "dac" ? "controlDac" : "controlGmv"], field),
+            raw: row.raw[field.key === "dac" ? "controlDac" : "controlGmv"] };
         return { text: "—", missing: true, reason: "该增量 / 成本指标仅适用于策略组" };
       }) });
   }
@@ -167,8 +169,9 @@ export function buildReportModules(report) {
     const sources = module.configuration.sources.filter(source => source.showInReport);
     const experiments = report.snapshot.experiments.map(savedEntry => {
       const id = reportExperimentKey(report.snapshot, savedEntry);
-      const entry = id === savedEntry.input.id ? savedEntry : { ...savedEntry, reportKey: id };
-      const result = findExperimentResult(report.results, entry, report.snapshot) || { status: "failed", error: "未保存该实验的数据" };
+      const original = id === savedEntry.input.id ? savedEntry : { ...savedEntry, reportKey: id };
+      const { entry, result } = moduleObservationResult(module, original,
+        findExperimentResult(report.results, original, report.snapshot) || { status: "failed", error: "未保存该实验的数据" });
       let datasets = [];
       const gaps = [];
       if (result.status === "success") for (const source of sources) {
@@ -246,10 +249,12 @@ export function demoModuleReport() {
   const modules = [
     { id: "multi-core", version: 1, configuration: { name: "核心指标表现", description: "比较支付频次、增量贡献与补贴成本",
       sources: [sources[0]], analysisType: "multi", reasoning: "分别核对实验自身对照组，比较指标增幅、ROI 与成本，再结合分层查看来源。",
-      considerations: "不同人群与观察期不能直接得出跨实验显著性。" } },
+      considerations: "不同人群与观察期不能直接得出跨实验显著性。",
+      reportDataBars: [{ sourceId: sources[0].id, key: "roi" }, { sourceId: sources[0].id, key: "cost" }] } },
     { id: "multi-coupon-interval", version: 1, configuration: { name: "领券核销间隔分布", description: "比较各实验从领券到核销的时效，按整体与券批次查看分布。",
       sources: [sources[1]], analysisType: "multi",
       reasoning: "先比较各实验、策略组的均值及 P10 / P25 / P50 / P75 / P90，再按券批次定位核销时效差异。统计单位为已核销优惠券，间隔单位为小时。",
+      reportDataBars: [{ sourceId: sources[1].id, key: "interval_mean" }, { sourceId: sources[1].id, key: "interval_p50" }],
       considerations: "仅统计观察窗口内已核销优惠券，未核销券不进入间隔分布，未发券对照组不参与比较。实验人群、券时效与观察窗口不同，间隔更短不能直接推断转化增量更大。",
       statisticsNotes: ["均值及各分位数按实验、策略组和券批次分别统计；整体分位数不能由各券批次分位数直接取平均。",
         "仅统计观察窗口内已核销优惠券；未核销券及未发券对照组不进入间隔分布。",

@@ -3,6 +3,7 @@ import { validateCalculatedMetrics } from "./analysis-module-calculations.js";
 import { createPreAAEvidence } from "./pre-aa-demo.js";
 import { experimentPairKey, selectedCandidateId, findExperimentResult } from "./experiment-identity.js";
 import { sectionIdentity, normalizeDirectory, directoryIssues } from "./report-directory-data.js";
+import { moduleObservationInput } from "./analysis-module-observation.js";
 // Local, fictional fixtures. All report surfaces derive from the same task snapshot.
 export const copy = value => structuredClone(value);
 export const multiId = prefix => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -407,8 +408,21 @@ export async function executeAnalysisTask(task, onUpdate = () => {}, delay = 240
       result.breakdowns = deriveBreakdowns(definition, input);
       if (definition.preAA) result.preAA = copy(definition.preAA);
       result.moduleCalculations = {};
-      for (const module of task.snapshot.modules.filter(module => module.configuration.calculatedMetrics?.length)) {
-        const raw = comparisonCalculationRecords(module.configuration, result, { input, definition });
+      for (const module of task.snapshot.modules) {
+        const observed = moduleObservationInput(module.configuration, input, definition);
+        let evidence = result;
+        if (module.configuration.observation?.anchor && module.configuration.observation.anchor !== "follow") {
+          const saved = result.moduleObservations ||= {};
+          if (observed.error) { saved[module.id] = { error: observed.error }; continue; }
+          const end = observed.input.end;
+          if (end !== input.end) {
+            evidence = { rows: definition.groups.filter(group => input.groupIds.includes(group.id))
+              .map(group => deriveGroup(definition, observed.input, group)), breakdowns: deriveBreakdowns(definition, observed.input) };
+          }
+          saved[module.id] = end === input.end ? { end } : { end, ...evidence };
+        }
+        if (!module.configuration.calculatedMetrics?.length) continue;
+        const raw = comparisonCalculationRecords(module.configuration, evidence, { input: observed.input, definition });
         result.moduleCalculations[module.id] = computeModuleCalculations(module.configuration, raw);
       }
       const calculationIssues = Object.values(result.moduleCalculations).flatMap(calculation => calculation.issues);

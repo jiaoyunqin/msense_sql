@@ -92,6 +92,36 @@ export function calculationCandidatesFor(module, definitionFor) {
         selected: (source.metricKeys || []).includes(field.key), grains: sourceMetricGrains(source, definition, field.key) }));
   });
 }
+
+// Local preview accepts explicit binary formulas from the analysis notes.
+export function parseCalculationNotes(reasoning, candidates) {
+  const normalize = text => text.normalize("NFKC").replace(/\s+/g, "").toLowerCase();
+  const resolve = value => {
+    const matched = candidates.filter(item => item.selected && normalize(item.name) === normalize(value));
+    return matched.length === 1 ? matched[0] : null;
+  };
+  return reasoning.normalize("NFKC").split(/[\n。；;]/).flatMap(line => {
+    const assignment = line.match(/^\s*(?:[-*]\s*)?(?:计算\s*)?([^=]+?)\s*=\s*(.+)$/);
+    if (!assignment) return [];
+    const [, label, expression] = assignment;
+    for (const match of expression.matchAll(/[+−\-×*÷/]/g)) {
+      const left = resolve(expression.slice(0, match.index).trim());
+      const rightText = expression.slice(match.index + 1).trim();
+      const right = resolve(rightText);
+      const constant = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(rightText) ? Number(rightText) : NaN;
+      const operator = ({ "−": "-", "×": "*", "÷": "/" })[match[0]] || match[0];
+      if (!left || (!right && (!Number.isFinite(constant) || operator === "/" && constant === 0))
+        || !commonCalculationGrains(left.grains, right ? right.grains : null).length) continue;
+      const name = label.trim();
+      if (!name) return [];
+      const metric = newCalculatedMetric();
+      metric.name = name;
+      metric.formula = { operator, left: left.ref, right: right?.ref || { type: "constant", value: constant } };
+      return [metric];
+    }
+    return [];
+  });
+}
 export function resolveCalculationMetricFor(module, ref, definitionFor, { requireSelected = true } = {}) {
   const fail = (code, message) => ({ candidate: null, issues: [{ code, message }] });
   if (!ref || ref.type !== "metric" || ![ref.sourceId, ref.capabilityId, ref.key].every(text) || !versionNumber(ref.version))

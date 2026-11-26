@@ -79,7 +79,7 @@ export function normalizeReading(saved = {}) {
     metric: saved.metric === "delta" ? "delta" : "share",
     sort: ["desc", "asc", "source"].includes(saved.sort) ? saved.sort : "desc",
     visible: Array.isArray(saved.visible) ? allIds().filter(id => saved.visible.includes(id)) : allIds(),
-    transposed: saved.transposed === true, dataBars: saved.dataBars !== false, selected: null
+    transposed: saved.transposed === true, selected: null
   };
 }
 export function readingState(view) {
@@ -91,7 +91,8 @@ export function readingState(view) {
   return view.showcase;
 }
 export function saveReading(state) {
-  const { selected, ...preferences } = state;
+  const { metric, sort, visible, transposed } = state;
+  const preferences = { metric, sort, visible, transposed };
   try { globalThis.localStorage?.setItem(preferenceKey, JSON.stringify(preferences)); } catch { /* Retain in-memory preferences. */ }
 }
 export function visibleRows(state) {

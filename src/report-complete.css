@@ -79,30 +79,7 @@
   @media (prefers-reduced-motion: reduce) {
     .cf-metric-grip, .cf-sort-icon { transition: none; }
   }
-  .reference-cell > .cf-cell-value { position: relative; isolation: isolate; }
-  .cf-cell-value::before {
-    content: "";
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: var(--cf-bar-left);
-    width: var(--cf-bar-width);
-    background-color: #e1eafa;
-    border-radius: 2px;
-    z-index: -1;
-    pointer-events: none;
-  }
-  .cf-cell-value[data-cf-bar-axis]::after {
-    content: "";
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: var(--cf-bar-zero);
-    width: 1px;
-    background-color: #acbdd5;
-    z-index: -1;
-    pointer-events: none;
-  }
+
 }
 
 #report-history.module-report .cf-report {

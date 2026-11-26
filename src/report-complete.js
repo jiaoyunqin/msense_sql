@@ -3,12 +3,11 @@ import { renderReportSummary } from "./report-summary.js";
 import { conclusionAnnotations, renderConclusionText } from "./report-conclusion-emphasis.js";
 import {
   completeSource as source, moduleScope, summaryScope, rowGroup, columnGroups,
-  readingState, saveReading, moduleRows, moduleColumns, columnBarDomains, cellBarGeometry,
+  readingState, saveReading, moduleRows, moduleColumns, columnBarDomains, completeBarMetrics,
   moduleMetrics, sortableColumn, moveMetric
 } from "./report-complete-data.js";
 import "./report-complete.css";
-import { comparisonDirection, formatColors, dataBarAppearance, dataBarColumn, compactTableLabel, significanceLabel, significantResult } from "./report-table-formatting.js";
-import { tableFormat, formatMetrics, formatButton, formatPanel, tableFormatEvent } from "./report-table-format-ui.js";
+import { comparisonDirection, dataBarAttributes, dataBarColumn, compactTableLabel, significanceLabel, significantResult } from "./report-table-formatting.js";
 import "./report-table-formatting.css";
 
 const esc = value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
@@ -65,16 +64,14 @@ function summaryHTML(report) {
   );
 }
 
-function cellHTML(cell, domain, format, metricIndex, separateSignificance = false) {
-  const bar = cell.unit === "text" ? null : cellBarGeometry(cell.value, domain);
-  const appearance = bar ? dataBarAppearance(format, metricIndex, cell.value, domain) : null;
+function cellHTML(cell, domain, separateSignificance = false) {
   const numeric = cell.unit !== "text" && typeof cell.value === "number" && Number.isFinite(cell.value);
   return `<div class="reference-cell${numeric ? " cf-numeric-cell" : ""}">${cell.text.split("\n").map((line, index) => {
     // Only decorate an explicit saved comparison. Never infer it from the raw
     // value, a percentage unit, or a significance label.
     const comparison = index > 0 && /^增幅\s/.test(line);
     const direction = comparison ? comparisonDirection(cell.lift) : null;
-    const emphasized = format.trends && significantResult(cell) && direction && direction !== "flat";
+    const emphasized = significantResult(cell) && direction && direction !== "flat";
     if (comparison) {
       const arrow = direction === "up" ? "M6 11V1m-4 4 4-4 4 4" : direction === "down" ? "M6 1v10m-4-4 4 4 4-4" : "M1 6h10";
       const visible = line.replace(/^增幅\s+/, "").replace(/^\d/, direction === "up" ? "+$&" : "$&");
@@ -84,8 +81,7 @@ function cellHTML(cell, domain, format, metricIndex, separateSignificance = fals
     if (sig && index > 0 && separateSignificance) return "";
     const cls = sig ? `reference-sig ${line === "正向显著" ? "positive" : line === "负向显著" ? "negative" : line === "显著" ? "significant" : ""}` : "";
     const tag = index ? "small" : "span";
-    const levelStyle = appearance?.level ? `--cf-bar-fill:${appearance.level.fill}%;` : "";
-    const barStyle = !index && bar ? ` class="cf-cell-value" style="--cf-bar-left:${bar.left}%;--cf-bar-width:${bar.width}%;--cf-bar-zero:${bar.zero}%;--cf-bar-rgb:${appearance.rgb};${levelStyle}"${bar.zero > 0 && bar.zero < 100 ? " data-cf-bar-axis" : ""}${appearance.level ? ` data-cf-bar-level="${appearance.level.id}" title="按绝对值分层：${appearance.level.label}（${appearance.level.threshold}）"` : ""}` : "";
+    const barStyle = !index && numeric ? dataBarAttributes(cell.value, domain) : "";
     return `<${tag}${barStyle || (cls ? ` class="${cls}"` : "")}>${typography(line)}</${tag}>`;
   }).filter(Boolean).join("\n")}</div>`;
 }
@@ -146,14 +142,10 @@ function headersHTML(module, columns, state) {
 function tableHTML(module, state, view) {
   const id = moduleScope(module), rows = moduleRows(module, state), columns = moduleColumns(module, state);
   const domains = columnBarDomains(module), metrics = moduleMetrics(module);
-  const format = tableFormat(view, module);
-  // Use original metric identities, never the sorted/filtered screen position.
-  const metricIndices = new Map(formatMetrics(module).flatMap((metric, index) =>
-    metric.columns.map(column => [column.index, index])));
-  const barColumns = new Set(metrics.filter(metric => format.metrics === null || format.metrics.includes(metric.id))
-    .flatMap(metric => metric.columns.filter(column => dataBarColumn(module, column)).map(column => column.index)));
+  const selected = new Set(completeBarMetrics(module));
+  const barColumns = new Set(module.columns.filter(column => selected.has(column.metric) && dataBarColumn(module, column)).map(column => column.index));
   const cell = (row, column) => cellHTML(row.cells[column.index],
-    format.bars && barColumns.has(column.index) ? domains.get(column.index) : null, format, metricIndices.get(column.index) ?? 0,
+    barColumns.has(column.index) ? domains.get(column.index) : null,
     separateSignificance(row, column, columns));
   const customized = state.sort || state.metricOrder.some((metricId, index) => metricId !== metrics[index].id);
   const body = state.transposed
@@ -167,16 +159,14 @@ function tableHTML(module, state, view) {
       `<tr data-cf-source-row="${row.id}">${columns.map(column =>
         `<td class="${column.index ? sortableColumn(module, column.id) ? "cf-numeric-column" : "" : "lead"}${module.id === "report-module-2" ? " reference-config-cell" : ""}" data-cf-source-column="${column.index}"${column.index === 0 ? ` id="cf-evidence-${row.id}" tabindex="-1"` : ""}>${cell(row, column)}</td>`
       ).join("")}</tr>`).join("")}</tbody></table>`;
-  return `<div class="data tblock" id="tb-${id}" data-cf-trend-palette="${format.trendPalette}" data-cf-bar-mode="${format.barMode}" style="--cf-bar-rgb:${formatColors[format.barColor].rgb}">
+  return `<div class="data tblock" id="tb-${id}">
     <div class="data-h"><strong>数据明细</strong></div><h3 class="tbl-title">${esc(module.tableTitle)}</h3>
     <div class="tabs-row"><div class="tabs" role="tablist" aria-label="${esc(module.tableTitle)}实验组">${[["all", "全部"], ...module.groups.map(group => [group, group])].map(([value, label]) =>
       `<button type="button" class="tab ${state.group === value ? "on" : ""}" role="tab" aria-selected="${state.group === value}" data-cf-module="${module.id}" data-cf-group="${esc(value)}">${esc(label)}</button>`
     ).join("")}</div><div class="tbl-tools"><small>${rows.length} 条数据</small>
       ${customized ? `<button class="btn-o sm cf-reset-order" type="button" data-cf-module="${module.id}" data-cf-reset-order title="恢复原始数据顺序与指标顺序">恢复排序</button>` : ""}
-      ${formatButton(module, view)}
       <button class="btn-o sm" type="button" data-cf-module="${module.id}" data-cf-transpose aria-pressed="${state.transposed}">⇄ 转置</button>
       <button class="btn-o sm" type="button" data-fs="${id}">⛶ 全屏</button></div></div>
-    ${formatPanel(module, view, format)}
     <div class="tbl-wrap" tabindex="0" aria-label="${esc(module.tableTitle)}，可横向滚动">${body}</div></div>`;
 }
 
@@ -255,8 +245,6 @@ function dragEvent(event, view) {
 }
 
 export function completeEvent(event, view) {
-  const formatChange = tableFormatEvent(event, view);
-  if (formatChange) return formatChange;
   if (["dragstart", "dragenter", "dragover", "drop", "dragend"].includes(event.type)) return dragEvent(event, view);
   if (event.type === "keydown") {
     const handle = event.target.closest("[data-cf-drag]");

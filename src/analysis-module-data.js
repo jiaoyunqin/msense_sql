@@ -1,6 +1,8 @@
 import { clone, uid, hash, defaultContext, currentActor, businessGoal } from "./composer-data.js";
 import { comparisonMetrics } from "./multi-experiment-data.js";
 import { templateReferenceModules } from "./report-template-reference-data.js";
+import { reportBarCandidates, normalizeReportBars } from "./analysis-module-visualization.js";
+import { validObservationDays } from "./analysis-module-observation.js";
 import {
   calculationCandidatesFor, resolveCalculationMetricFor, validateCalculatedMetrics,
   newCalculatedMetric, calculationMetricRef
@@ -119,12 +121,20 @@ export function newAnalysisModule() {
     reasoning: "", considerations: "", context: clone(defaultContext), scenario: "normal",
     savedAt: "", updatedAt: "", attempts: [], versions: [], enabled: true, archived: false };
 }
+export const moduleBarCandidates = (store, module) => reportBarCandidates(module, source => sourceDefinition(store, source));
+export function pruneModuleBars(store, module) {
+  const refs = normalizeReportBars(module, moduleBarCandidates(store, module));
+  if (refs.length) module.reportDataBars = refs;
+  else delete module.reportDataBars;
+}
 export function moduleConfiguration(module) {
   return clone({
-    name: module.name, description: module.description, goal: businessGoal, apps: module.apps,
+    name: module.name, description: module.description, goal: module.goal ?? businessGoal, apps: module.apps,
     analysisType: module.analysisType || "single",
     sources: module.sources.map(({ expanded, ...source }) => source),
     reasoning: module.reasoning, considerations: module.considerations,
+    ...(module.observation?.anchor && module.observation.anchor !== "follow" ? { observation: module.observation } : {}),
+    ...(module.reportDataBars?.length ? { reportDataBars: module.reportDataBars } : {}),
     ...(module.reportOrder ? { reportOrder: module.reportOrder } : {}),
     // Omit empty definitions to preserve legacy configuration/trial hashes exactly.
     ...(module.calculatedMetrics != null && (!Array.isArray(module.calculatedMetrics) || module.calculatedMetrics.length)
@@ -247,7 +257,7 @@ export function initializeModules(store) {
     module.analysisType ||= "single";
     module.sources ||= []; module.versions ||= []; module.attempts ||= []; module.apps ||= [];
     module.calculatedMetrics ??= [];
-    module.context ||= clone(defaultContext); module.goal = businessGoal;
+    module.context ||= clone(defaultContext); module.goal ??= businessGoal;
     for (const attempt of module.attempts) if (attempt.status === "running") {
       attempt.status = "insufficient"; attempt.error = "页面重载中断了试跑，请重新运行。";
       attempt.gaps ||= []; attempt.gaps.push(attempt.error);
@@ -308,10 +318,15 @@ export function copyModuleSources(module) {
     for (const kind of ["metrics", "dimensions"]) if (reportOrder[kind])
       reportOrder[kind] = Object.fromEntries(Object.entries(reportOrder[kind]).map(([id, keys]) => [remap(id), keys]));
   }
-  return { sources, calculatedMetrics, sourceIdMap, ...(reportOrder ? { reportOrder } : {}) };
+  const reportDataBars = module.reportDataBars?.map(ref => ({ ...ref, sourceId: sourceIdMap.get(ref.sourceId) || ref.sourceId }));
+  return { sources, calculatedMetrics, sourceIdMap, reportDataBars, ...(reportOrder ? { reportOrder } : {}) };
 }
 export function moduleIssues(store, module, sources = module.sources, { sourceTrial = false } = {}) {
   const issues = [];
+  if (module.goal === "") issues.push("请选择业务目标。");
+  if (module.observation?.anchor && module.observation.anchor !== "follow"
+    && (!["start", "end"].includes(module.observation.anchor) || !validObservationDays(module.observation.days)))
+    issues.push("模块观测区间的偏移天数须为非负整数。");
   if (!["single", "multi"].includes(module.analysisType || "single")) issues.push("请选择分析类型。");
   if (module.analysisType === "multi" && !module.reasoning.trim()) issues.push("请说明跨实验分析思路。");
   if (!module.name.trim()) issues.push("请填写模块名称。");
