@@ -30,6 +30,8 @@ check("增加标绿、减少标红，不按成本或降级指标反转、不以�
   assert.deepEqual(directions(render("相对不发券提升2.3%，未提升3%，预计增长+2%，最高4，最低1，增幅0%。")),
     [["up", "2.30%"]]);
   assert.deepEqual(directions(render("指标由-5升至-2，另一项由-2降至-5。")), [["up", "-2"], ["down", "-5"]]);
+  assert.deepEqual(directions(render("缺失率降至0%，余额由-2回升至0元，增幅0%，预计降低到0%。")),
+    [["down", "0.00%"], ["up", "0"]]);
 });
 check("方向与重点独立，一般涨跌只着色，明确选择的数字才加粗放大", () => {
   const item = { text: "支付天提升5%，GMV下降2.3%，仅描述变化。", scope: "test" };
@@ -68,6 +70,10 @@ check("括号样式优先于重点和方向，支持嵌套括号，不将缩写�
   assert(html.includes("支付天(DAC)"));
   assert.equal(strip(html), "提升2.30%（下降1.23%，包括（占比35.00%））；价格(5,10]元，支付天(DAC)。");
   assert.deepEqual(directions(render("缩短0.41小时（8.04%）、0.40小时（7.77%）。")), [["down", "0.41"], ["down", "0.40"]]);
+  const metricNote = render("支付天 (DAC)；分位数（P50）；（GMV 2.345）。", [["2.345", "key", "module"]]);
+  assert.match(metricNote, /支付天 \(DAC\)；分位数（P50）；<em class="cf-parenthetical">（GMV /);
+  assert.match(metricNote, /<em class="cf-parenthetical"><span[^>]*>2\.35<\/span><\/em>/);
+  assert(!metricNote.includes('class="cf-highlight '));
 });
 check("标识符、日期、时间、版本、分位数和整数编号保持原样", () => {
   const text = "实验DEMO-001，Libra ID 123456，日期2026-10-01，10:30，v1.2，模型2，P50 1.2345小时。";

@@ -399,11 +399,12 @@ export function mountReportHistory({ main, shell, showToast, extensions = () => 
   }
 
   function openPopup(button, scope) {
-    if (!findSec(report, scope)) return;
+    const section = findSec(report, scope);
+    if (!section) return;
     if (report.moduleReport) {
       root.classList.remove("agent-hidden"); shell.classList.remove("report-agent-hidden");
-      const section = $(`#sec-${scope}`);
-      session().quote = section?.querySelector("[data-summary-body], .mm-conclusion > ul")?.textContent?.trim().slice(0, 400) || findSec(report, scope).title;
+      const body = button.closest(".ccard")?.querySelector("[data-summary-body], .cf-prose, :scope > ul");
+      session().quote = body?.textContent.trim().slice(0, 400) || section.title;
       session().quoteScope = scope; save(); renderAgent(); if (narrow()) setExpanded(true);
       $("#aiText").focus({ preventScroll: true }); return;
     }

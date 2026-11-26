@@ -197,7 +197,9 @@ function noteRanges(text, protectedText) {
     if ("（(".includes(text[index])) stack.push(index);
     else if ("）)".includes(text[index]) && stack.length) {
       const start = stack.pop(), value = text.slice(start, index + 1);
-      if (!stack.length && !/^[（(][A-Za-z][\w\s/+.-]*[）)]$/.test(value)) ranges.push({ start, end: index + 1 });
+      if (stack.length) continue;
+      const abbreviation = /^[（(][A-Za-z][\w\s/+.-]*[）)]$/.test(value) && !numbersIn(value).length;
+      if (!abbreviation) ranges.push({ start, end: index + 1 });
     }
   }
   return ranges;
@@ -218,7 +220,6 @@ const upWords = "提升|提高|上升|上涨|增加|增长|增至|升至|升高|
 const downWords = "下降|降低|下跌|减少|缩短|缩减|降至|降为|低";
 function directionOf(text, token, tokens) {
   const raw = token.raw;
-  if (Number(raw.replaceAll(",", "").replace(/[％%]/g, "").replace("−", "-").replace("＋", "+")) === 0) return null;
   const previous = tokens.filter(item => item.end <= token.start).at(-1);
   const sincePrevious = text.slice(previous?.end || 0, token.start);
   const prefix = text.slice(0, token.start);
@@ -227,9 +228,10 @@ function directionOf(text, token, tokens) {
   const before = cue ? clause.slice(0, cue.index) : clause;
   if (/(?:未|没有|不|无|并非)(?:明显|显著|继续|持续|进一步|发生|出现|见|能|会)*$/.test(before)
     || /(?:预计|预期|目标|假设|如果|若|计划|有望|可能)[^，；。]*$/.test(before)) return null;
-  // "升至 -2" describes a target value, whose sign is not the change direction.
+  // "降至 0" and "升至 -2" describe target values, not signed changes.
   if (cue && /(?:至|到|为)\s*$/.test(cue[0]))
     return new RegExp(`^(?:${upWords})$`).test(cue[1]) ? "positive" : "negative";
+  if (Number(raw.replaceAll(",", "").replace(/[％%]/g, "").replace("−", "-").replace("＋", "+")) === 0) return null;
   const inList = previous && /^(?:[%％万亿元人名张天小时个百分点/日\s]*[、/和及～~–—-]\s*)$/.test(sincePrevious);
   // A signed delta has direction; a negative absolute ROI/value need not
   // describe a decrease. Keep the sign's meaning tied to its local context.
