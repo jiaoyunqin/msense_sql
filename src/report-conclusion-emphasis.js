@@ -1,9 +1,8 @@
 const esc = value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 
-// Reviewed claims, scoped to their source module. A positive number is not
-// automatically a benefit: costs, statistical uncertainty and metric meaning
-// determine tone. "key" marks important descriptive evidence without a verdict.
-// Optional context disambiguates a value repeated in different claims.
+// Reviewed key evidence, scoped to its source module. The legacy tone column
+// is selection metadata only: phase-one colors come from numeric direction,
+// never a business-benefit verdict. Context disambiguates repeated values.
 export const conclusionAnnotations = {
   "cf-summary": [
     ["10.42%、13.18%、12.85%", "positive", "report-module-10"],
@@ -155,24 +154,127 @@ export const conclusionAnnotations = {
   ]
 };
 
-const numericHTML = text => text.split(/([+\-−]?\d+(?:,\d{3})*(?:\.\d+)?(?:%|％|万|亿)?(?:[–—~～][+\-−]?\d+(?:,\d{3})*(?:\.\d+)?(?:%|％|万|亿)?)?(?:元|小时|人|名|个百分点|张|天)?)/g)
-  .filter(Boolean).map(part => /^[+\-−]?\d/.test(part) ? `<span class="cf-number">${esc(part)}</span>` : esc(part)).join("");
+const numberPattern = /[+＋\-−]?\d+(?:,\d{3})*(?:\.\d+)?(?:[%％])?/g;
+const overlaps = (a, b) => a.start < b.end && b.start < a.end;
+const contains = (range, start, end) => range.start <= start && range.end >= end;
+const sourceText = item => item.runs?.length ? item.runs.map(run => run.text ?? "").join("") : String(item.text ?? "");
+const intervalPattern = /[（(\[［]\s*[+\-−]?\d+(?:\.\d+)?\s*[,，]\s*[+\-−]?\d+(?:\.\d+)?\s*[）)\]］]/g;
 
-// Generated conclusions carry the saved within-experiment significance in prose.
-// Match that explicit evidence, never the numeric sign alone. Costs and
-// descriptive measures stay neutral unless a reviewed business verdict exists.
+// Decimal-string rounding avoids binary floating-point errors (e.g. 1.005).
+// Only prose decimals and percentages change; source values remain untouched.
+export function formatConclusionNumber(raw) {
+  const match = raw.match(/^([+＋\-−]?)(\d+(?:,\d{3})*)(?:\.(\d+))?([%％]?)$/);
+  if (!match || (!match[3] && !match[4])) return raw;
+  const [, sign, integer, fraction = "", percent] = match;
+  let hundredths = BigInt(integer.replaceAll(",", "")) * 100n + BigInt((fraction + "00").slice(0, 2));
+  if (Number(fraction[2] || 0) >= 5) hundredths++;
+  let whole = String(hundredths / 100n);
+  if (integer.includes(",")) whole = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  // Do not display a negative zero after rounding.
+  const prefix = hundredths === 0n && /[-−]/.test(sign) ? "" : sign;
+  return `${prefix}${whole}.${String(hundredths % 100n).padStart(2, "0")}${percent}`;
+}
+
+function protectedRanges(text) {
+  const patterns = [
+    /\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?/g,
+    /\d{1,2}:\d{2}(?::\d{2})?/g,
+    /[A-Za-z][A-Za-z\d]*(?:[-_.][A-Za-z\d]+)*/g,
+    /(?:实验\s*ID|Libra\s*ID|版本)\s*[:：]?\s*[vV]?\d+(?:\.\d+)*/gi
+  ];
+  return patterns.flatMap(pattern => [...text.matchAll(pattern)].map(match => {
+    // Metric names may directly precede a value; those digits are not an ID.
+    const metric = match[0].match(/^(?:GMV-ROI|ROI|DAC|GMV)(?=\d)/)?.[0];
+    return { start: match.index, end: match.index + (metric || match[0]).length };
+  }));
+}
+
+function noteRanges(text, protectedText) {
+  const intervals = [...text.matchAll(intervalPattern)].map(match => ({ start: match.index, end: match.index + match[0].length }));
+  const stack = [], ranges = [];
+  for (let index = 0; index < text.length; index++) {
+    if ([...protectedText, ...intervals].some(range => contains(range, index, index + 1))) continue;
+    if ("（(".includes(text[index])) stack.push(index);
+    else if ("）)".includes(text[index]) && stack.length) {
+      const start = stack.pop(), value = text.slice(start, index + 1);
+      if (!stack.length && !/^[（(][A-Za-z][\w\s/+.-]*[）)]$/.test(value)) ranges.push({ start, end: index + 1 });
+    }
+  }
+  return ranges;
+}
+
+function numbersIn(text) {
+  const protectedText = protectedRanges(text);
+  return [...text.matchAll(numberPattern)].flatMap(match => {
+    let raw = match[0], start = match.index;
+    // A range dash is a separator, not a negative sign on its upper bound.
+    if (/^-/.test(raw) && /[\d%％]$/.test(text.slice(0, start))) { start++; raw = raw.slice(1); }
+    const token = { start, end: start + raw.length, raw };
+    return protectedText.some(range => overlaps(range, token)) ? [] : [token];
+  });
+}
+
+const upWords = "提升|提高|上升|上涨|增加|增长|增至|升至|升高|扩大|多";
+const downWords = "下降|降低|下跌|减少|缩短|缩减|降至|降为|低";
+function directionOf(text, token, tokens) {
+  const raw = token.raw;
+  if (Number(raw.replaceAll(",", "").replace(/[％%]/g, "").replace("−", "-").replace("＋", "+")) === 0) return null;
+  const previous = tokens.filter(item => item.end <= token.start).at(-1);
+  const sincePrevious = text.slice(previous?.end || 0, token.start);
+  const prefix = text.slice(0, token.start);
+  const clause = prefix.split(/[，,；;。！？：:（）()]/).at(-1);
+  const cue = clause.match(new RegExp(`(${upWords}|${downWords})(?:约|近|了|为|至|达|到|分别|相对|绝对|累计|\\s)*$`));
+  const before = cue ? clause.slice(0, cue.index) : clause;
+  if (/(?:未|没有|不|无|并非)(?:明显|显著|继续|持续|进一步|发生|出现|见|能|会)*$/.test(before)
+    || /(?:预计|预期|目标|假设|如果|若|计划|有望|可能)[^，；。]*$/.test(before)) return null;
+  // "升至 -2" describes a target value, whose sign is not the change direction.
+  if (cue && /(?:至|到|为)\s*$/.test(cue[0]))
+    return new RegExp(`^(?:${upWords})$`).test(cue[1]) ? "positive" : "negative";
+  const inList = previous && /^(?:[%％万亿元人名张天小时个百分点/日\s]*[、/和及～~–—-]\s*)$/.test(sincePrevious);
+  // A signed delta has direction; a negative absolute ROI/value need not
+  // describe a decrease. Keep the sign's meaning tied to its local context.
+  const changeContext = cue || /增幅|增量|变化|变动|差值|差额|正向|负向/.test(clause)
+    || inList && directionOf(text, previous, tokens);
+  if (/^[+＋]/.test(raw) && changeContext) return "positive";
+  if (/^[-−]/.test(raw) && changeContext) return "negative";
+  // Continue an explicitly directed number list, including its repeated unit.
+  if (inList)
+    return directionOf(text, previous, tokens);
+  if (!cue) return null;
+  if (/最$/.test(before)) return null;
+  return new RegExp(`^(?:${upWords})$`).test(cue[1]) ? "positive" : "negative";
+}
+
+// Demo key selection follows the message's focal metric and named evidence.
+// A direction by itself must never select a number as key.
 export function generatedConclusionAnnotations(item, scope = "") {
-  const text = String(item.text || ""), annotations = [];
-  for (const match of text.matchAll(/增幅\s*([+＋\-−]?\d+(?:\.\d+)?%)\s*[（(，,]\s*(正向显著|负向显著|不显著)/g)) {
-    const clause = text.slice(0, match.index).split(/[；;：:）)]/).at(-1);
-    const cost = item.metricKey === "cost" || /成本|消耗|费用/.test(clause);
-    const tone = cost || match[2] === "不显著" ? "key" : match[2] === "正向显著" ? "positive" : "negative";
-    annotations.push([match[1], tone, item.scope || scope, match[0], match.index + match[0].indexOf(match[1])]);
+  const text = sourceText(item), tokens = numbersIn(text);
+  return tokens.filter(token =>
+    (["dac", "gmv", "roi", "cost"].includes(item.metricKey) && /[.%％]/.test(token.raw))
+    || /(?:ROI|均值|P50|P90|平均间隔|核销间隔)[^\d，；。]{0,8}$/.test(text.slice(0, token.start)))
+    .map(token => [token.raw, "key", item.scope || scope, null, token.start]);
+}
+
+function summaryRange(item, text, runs) {
+  if (item.kind === "heading" || runs.some(run => run.strong) || item.note) return null;
+  if (item.summary) {
+    const start = text.indexOf(item.summary);
+    return start >= 0 ? { start, end: start + item.summary.length } : null;
   }
-  for (const match of text.matchAll(/(?:ROI\s+|(?:均值|P50|P90|间隔)[^；。]*?)([+\-−]?\d+(?:,\d{3})*(?:\.\d+)?(?:～|–|-)?\d*(?:\.\d+)?(?:\s*小时)?)/gi)) {
-    annotations.push([match[1], "key", item.scope || scope, match[0], match.index + match[0].indexOf(match[1])]);
+  // Prefer an existing concise judgement, not a numeric evidence enumeration.
+  const judgement = /最高|最低|最短|最长|为主|主导|主要|集中|提升|下降|改善|差异|不同|通过|接近|短于|高于|低于|更高|更低|达标|表现|覆盖|未提供|无法|不足/;
+  const excluded = [...protectedRanges(text), ...noteRanges(text, protectedRanges(text))];
+  for (const match of text.matchAll(/[^。！？\n]+[。！？]?/g)) {
+    const sentence = match[0];
+    const colon = sentence.indexOf("：");
+    const candidate = colon > 0 && colon < 110 ? sentence.slice(0, colon + 1) : sentence;
+    const mainText = candidate.split("").map((character, index) =>
+      excluded.some(range => contains(range, match.index + index, match.index + index + 1)) ? " " : character).join("");
+    if (candidate.length > 160 || !judgement.test(mainText) || /[+\-−]?\d+\.\d|[%％]/.test(mainText)) continue;
+    const range = { start: match.index, end: match.index + candidate.length };
+    return range;
   }
-  return annotations;
+  return null;
 }
 
 export function renderConclusionText(item, annotations = []) {
@@ -183,32 +285,42 @@ export function renderConclusionText(item, annotations = []) {
     return { ...run, start, end: offset, text };
   });
   const text = runs.map(run => run.text).join("");
-  const highlights = annotations.flatMap(([value, tone, evidence, context, position]) => {
+  const highlights = annotations.flatMap(([value, , evidence, context, position]) => {
     const anchor = context ? text.indexOf(context) : 0;
-    if (anchor < 0 || !["positive", "negative", "key"].includes(tone)) return [];
+    if (anchor < 0) return [];
     const start = Number.isInteger(position) && text.slice(position, position + value.length) === value
       ? position : text.indexOf(value, anchor);
     return start < 0 || (context && !Number.isInteger(position) && start + value.length > anchor + context.length) ? []
-      : [{ start, end: start + value.length, tone, evidence }];
+      : [{ start, end: start + value.length, evidence }];
   }).sort((a, b) => a.start - b.start || b.end - a.end)
     .filter((range, index, all) => !all.slice(0, index).some(previous => previous.end > range.start));
-  const notes = [...text.matchAll(/（[^（）()[\]［］\n]*）|\([^（）()[\]［］\n]*\)/g)]
-    .filter(match => !/^[（(][A-Za-z][\w\s/+.-]*[）)]$/.test(match[0]))
-    .map(match => ({ start: match.index, end: match.index + match[0].length }));
-  const boundaries = [...new Set([0, text.length, ...[...runs, ...highlights, ...notes].flatMap(range => [range.start, range.end])])].sort((a, b) => a - b);
+  const notes = [...noteRanges(text, protectedRanges(text)), ...runs.filter(run => run.note)];
+  const numbers = numbersIn(text);
+  const trendNumbers = numbers.filter(token => !notes.some(note => overlaps(note, token)));
+  const directionText = text.split("").map((character, index) => notes.some(note => contains(note, index, index + 1)) ? " " : character).join("");
+  const summary = summaryRange(item, text, runs);
+  const boundaries = [...new Set([0, text.length, ...[...runs, ...highlights, ...notes, ...numbers, ...(summary ? [summary] : [])]
+    .flatMap(range => [range.start, range.end])])]
+    // Keep each number atomic even when rich-text runs split its digits.
+    .filter(offset => !numbers.some(token => token.start < offset && offset < token.end)).sort((a, b) => a - b);
 
-  // Match claims against the full item before preserving source formatting.
-  // This handles numbers split across rich-text runs and keeps note styles
-  // from weakening the foreground, weight or size of selected evidence.
   return boundaries.slice(0, -1).map((start, index) => {
     const end = boundaries[index + 1];
-    const run = runs.find(range => range.start <= start && range.end >= end);
-    const highlight = highlights.find(range => range.start <= start && range.end >= end);
-    const note = run?.note || notes.some(range => range.start <= start && range.end >= end);
-    let html = numericHTML(text.slice(start, end)).replaceAll("\n", "<br>\n");
-    if (highlight) html = `<strong class="cf-highlight cf-highlight-${highlight.tone}" data-cf-evidence="${esc(highlight.evidence)}">${html}</strong>`;
-    else if (run?.strong) html = `<strong>${html}</strong>`;
-    if (note) html = `<em class="${run?.note ? "cf-note" : "cf-parenthetical"}">${html}</em>`;
+    const span = { start, end }, token = numbers.find(range => contains(range, start, end));
+    const highlight = highlights.find(range => overlaps(range, span));
+    const note = notes.some(range => overlaps(range, span));
+    const strong = runs.some(run => run.strong && overlaps(run, span)) || summary && contains(summary, start, end);
+    const direction = !note && token && directionOf(directionText, token, trendNumbers);
+    const key = Boolean(token && (highlight || runs.some(run => run.key && overlaps(run, span))));
+    const value = text.slice(start, end), formatted = token ? formatConclusionNumber(value) : value;
+    let html = esc(formatted).replaceAll("\n", "<br>\n");
+    if (token) html = `<span class="cf-number" data-cf-raw="${esc(value)}"${formatted !== value ? ` title="原始值：${esc(value)}"` : ""}>${html}</span>`;
+    if (note) return `<em class="cf-parenthetical">${html}</em>`;
+    if (key || highlight && !token) {
+      html = `<strong class="cf-highlight cf-highlight-${direction || "key"}" data-cf-evidence="${esc(highlight?.evidence || item.scope || "")}"${direction ? ` data-cf-direction="${direction === "positive" ? "up" : "down"}"` : ""}>${html}</strong>`;
+    } else if (direction) {
+      html = `<span class="cf-trend cf-trend-${direction}" data-cf-direction="${direction === "positive" ? "up" : "down"}">${html}</span>`;
+    } else if (strong && !token) html = `<strong class="cf-key-sentence">${html}</strong>`;
     return html;
   }).join("");
 }

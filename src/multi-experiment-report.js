@@ -4,7 +4,7 @@ import { normalizeReportStatus } from "./report-filters.js";
 import { matrixPresentation, captureMatrixSnapshot, buildMatrixComparisons, matrixDatasetKey, matrixView, findMatrixCell, matrixEvidenceScope, matrixTables, matrixTableForDataset, matrixTableScope } from "./matrix-report-data.js";
 import { usesMatrix, matrixHTML, applyMatrixEvent, focusMatrixEvidence } from "./matrix-report-ui.js";
 import { experimentLabel, reportExperimentKey, reportExperimentLabel, repeatedLibraId, selectedCandidateId, findExperimentResult } from "./experiment-identity.js";
-import { buildMultiReportSummary } from "./multi-report-summary.js";
+import { buildMultiReportSummary, moduleConclusionOverview } from "./multi-report-summary.js";
 import { renderReportSummary, reportSummaryText } from "./report-summary.js";
 import { renderConclusionText, generatedConclusionAnnotations } from "./report-conclusion-emphasis.js";
 import { detailTable, detailReading, detailFields, detailRecords, detailControls, detailHeading, detailSortAria, detailValue, detailComparison, detailEvent } from "./report-detail-tools.js";
@@ -76,9 +76,9 @@ export function reportListRow(report) {
     owner: "秦娇芸", createdAt, created: new Date(createdAt).toLocaleString("sv-SE").slice(0, 16),
     generated: report.createdAt ? new Date(report.createdAt).toLocaleString("sv-SE").slice(0, 16) : "", multi: true };
 }
-function conclusionHTML(title, messages, scope) {
+function conclusionHTML(title, messages, scope, overview = "") {
   return `<div class="ccard mm-conclusion" data-card="${scope}"><div class="ccard-h"><span class="t">${svg("chart")}${title}</span><span class="grow"></span>${ai(scope)}</div>
-    ${messages.length ? `<div class="cf-prose"><ul>${messages.map(message => `<li>${renderConclusionText(message, generatedConclusionAnnotations(message, scope))}</li>`).join("")}</ul></div>` : '<p class="mm-muted">当前没有可用分析结论。</p>'}</div>`;
+    ${messages.length ? `<div class="cf-prose">${overview ? `<p class="cf-module-overview">${renderConclusionText({ runs: [{ text: overview, strong: true }], scope })}</p>` : ""}<ul>${messages.map(message => `<li>${renderConclusionText(message, generatedConclusionAnnotations(message, scope))}</li>`).join("")}</ul></div>` : '<p class="mm-muted">当前没有可用分析结论。</p>'}</div>`;
 }
 function cellHTML(cell, model, field) {
   const title = cell.reason || (cell.raw != null ? `原值：${cell.raw}${cell.control != null ? `；自身对照组：${cell.control}` : ""}` : cell.text);
@@ -161,7 +161,7 @@ export function renderMultiReport(report, view) {
         ${experimentHTML(report, module, experiment, state, singleExperimentModule(report, module), view)}`;
       return `${directoryHeading(report, module.id, esc)}<section class="sec mm-module" id="sec-${module.id}" data-sec="${module.id}" data-mm-section="${module.id}" data-module-analysis-type="${module.analysisType}">
         <header class="mm-module-heading"><h2>${esc(module.title)}</h2><p>${esc(module.description)}</p></header>
-        ${cross ? conclusionHTML("多实验分析结论", module.conclusions, module.id) : ""}
+        ${cross ? conclusionHTML("多实验分析结论", module.conclusions, module.id, moduleConclusionOverview(module)) : ""}
         ${matrix ? `<div class="mm-data-heading">${svg("data")}<strong>数据明细</strong></div>
           ${matrixHTML(module, state, view)}` : detail()}</section>`;
     }).join("")}</div>`;
@@ -212,7 +212,7 @@ export function multiAnswer(report, question, scope = "all", view = {}) {
       ? module.experiments : module.experiments.filter(experiment => experiment.status === "success");
     lines.push(`**${module.title}**`);
     if (!context.experiment && module.analysisType === "multi")
-      lines.push(...module.conclusions.map(conclusion => conclusion.text), `[[cite:${module.id}::查看多实验分析结论]]`);
+      lines.push(...[moduleConclusionOverview(module), ...module.conclusions.map(conclusion => conclusion.text)].filter(Boolean), `[[cite:${module.id}::查看多实验分析结论]]`);
     for (const experiment of experiments) {
       if (context.experiment || module.analysisType === "single" || /核对|计算|缺失/.test(question)) {
         lines.push(`${experiment.name}（${experimentLabel(experiment)}）：`, ...(experiment.conclusions.length ? experiment.conclusions.map(conclusion => conclusion.text) : [experiment.error || "未提供分析结论"]),

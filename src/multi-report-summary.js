@@ -66,14 +66,30 @@ function metricOverview(evidence, key) {
   return detail.length ? `${name}方面，${detail.join("，")}。` : "";
 }
 function coreDetails(entry) {
-  return `${label(entry.experiment)}：${[...entry.groups.values()].map(group =>
-    `${group.name}（${[...group.values.values()].map(({ field, cell }) => {
-      if (cell.missing) return `${field.name}缺失${cell.reason ? `：${cell.reason}` : ""}`;
-      if (field.uplift && cell.uplift != null)
-        return `${field.name}增幅 ${percent(cell.uplift)}${cell.sig ? `，${cell.sig}` : ""}`;
-      return `${field.name} ${cell.text}${field.unit && field.unit !== "元" ? ` ${field.unit}` : ""}`;
-    }).join("；")}）`
-  ).join("；")}。`;
+  const runs = [{ text: `${label(entry.experiment)}，` }];
+  for (const [groupIndex, group] of [...entry.groups.values()].entries()) {
+    runs.push({ text: `${groupIndex ? "；" : ""}${group.name}：` });
+    for (const [index, { field, cell }] of [...group.values.values()].entries()) {
+      const prefix = `${index ? "，" : ""}${field.name}`;
+      if (cell.missing) {
+        runs.push({ text: `${prefix}缺失${cell.reason ? `：${cell.reason}` : ""}` });
+      } else if (field.uplift && cell.uplift != null) {
+        runs.push({ text: `${prefix}增幅 ` }, { text: percent(cell.uplift), key: field.key === "dac" || field.key === "gmv" });
+        if (cell.sig) runs.push({ text: `（${cell.sig}）` });
+      } else {
+        runs.push({ text: `${prefix} ${cell.text}${field.unit && field.unit !== "元" ? ` ${field.unit}` : ""}` });
+      }
+    }
+  }
+  runs.push({ text: "。" });
+  return { text: runs.map(run => run.text).join(""), runs };
+}
+// A compact module lead uses the same frozen evidence as the report summary.
+// It gives enumerated per-experiment conclusions an explicit overview without
+// inventing significance, business thresholds or a cross-experiment winner.
+export function moduleConclusionOverview(module) {
+  const evidence = coreEvidence(summaryModules([module]));
+  return ["dac", "gmv"].map(key => metricOverview(evidence, key)).filter(Boolean).join("");
 }
 function moduleHighlights(module) {
   const successful = module.experiments.filter(experiment => experiment.status === "success");

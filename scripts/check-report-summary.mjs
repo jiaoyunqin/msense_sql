@@ -34,6 +34,11 @@ check("整份报告汇总显著性、逐实验钱效及其他模块发现，不�
   const report = reportDescriptor(demoMatrixModuleReport()), summary = text(report);
   assert(summary.includes("2 个实验存在正向显著策略组"));
   assert(summary.includes("1 个实验的策略组均不显著"));
+  const html = summaryHTML(report);
+  assert.match(html, /<strong class="cf-highlight cf-highlight-positive"[^>]*data-cf-direction="up"><span[^>]*>\+9\.47%<\/span><\/strong><em class="cf-parenthetical">（正向显著）<\/em>/);
+  assert.equal((html.match(/<strong class="cf-highlight cf-highlight-positive"[^>]*data-cf-direction="up"/g) || []).length, 8);
+  assert.match(html, /￥<span class="cf-number"[^>]*>80\.98<\/span>，GMV-ROI/);
+  assert(!html.includes('data-cf-direction="down"'));
   for (const experiment of report.moduleContent[0].experiments) {
     assert(summary.includes(experiment.name) && summary.includes(experiment.id));
     for (const row of experiment.datasets.find(dataset => dataset.mode === "overall").records.filter(row => !row.control)) {

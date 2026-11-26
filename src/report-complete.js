@@ -49,7 +49,7 @@ function typography(text) {
   }).join("");
 }
 
-const runsHTML = (item, scope) => renderConclusionText(item, conclusionAnnotations[scope]);
+const runsHTML = (item, scope) => renderConclusionText({ ...item, scope }, conclusionAnnotations[scope]);
 
 function blocksHTML(blocks, scope) {
   return blocks.map(block => block.kind === "heading" ? `<h4>${runsHTML(block, scope)}</h4>`
