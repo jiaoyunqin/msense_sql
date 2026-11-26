@@ -42,6 +42,7 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
   let search = "", creator = "", state = "all", type = "all", sort = "updated", errors = [], running = false;
   let page = 1, pageSize = 20;
   const configurationTabs = new Map();
+  const visualizationSources = new Map();
   let draggedOrder = null;
   const orderAttrs = (kind, block, key) => `data-order-kind="${kind}" data-order-block="${esc(block)}" data-order-key="${esc(key)}"`;
   const orderGrip = (kind, block, key, name) => `<button type="button" class="am-order-grip" draggable="true" ${orderAttrs(kind, block, key)} aria-label="调整${esc(name)}顺序" title="拖拽排序，或用方向键调整">${icon("grip-vertical")}</button>`;
@@ -236,40 +237,96 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
     refreshVisualization();
   }
 
+  function visualizationMetricsHTML(fields, ids) {
+    return fields.map(({ sourceId, key, name }) => {
+      const id = reportBarId(sourceId, key);
+      return `<label class="am-vis-metric-option"><input type="checkbox" data-model="mod-bar-metric" value="${esc(id)}"${ids.has(id) ? " checked" : ""}><span>${esc(name)}</span></label>`;
+    }).join("");
+  }
   function visualizationHTML(module, candidates, open = false) {
-    const ids = reportBarIds(module), selected = candidates.filter(({ sourceId, key }) => ids.has(reportBarId(sourceId, key)));
+    const ids = reportBarIds(module);
     const groups = Map.groupBy(candidates, candidate => candidate.sourceId);
+    const active = groups.has(visualizationSources.get(module.id)) ? visualizationSources.get(module.id) : groups.keys().next().value;
+    visualizationSources.set(module.id, active);
     return `<div class="am-vis-head"><div><h2 id="am-vis-title">数据可视化</h2><p>基于分析思路 AI 一键推荐重点指标，在报告数据明细中用数据条突出显示。</p></div>
       ${aiButton("recommend-bars", "AI生成可视化推荐", !candidates.length || !module.reasoning.trim())}</div>
-      <details class="am-vis-picker"${open && candidates.length ? " open" : ""}>
-        <summary><span>数据条</span><strong data-vis-count>${selected.length ? `已选 ${selected.length} 项` : "未选择"}</strong>${icon("chevron-down")}</summary>
-        <div class="am-vis-options">${[...groups.values()].map(fields => `<fieldset><legend>${esc(fields[0].sourceName || "取数指标")}</legend><div>${fields.map(({ sourceId, key, name }) => {
-          const id = reportBarId(sourceId, key);
-          return `<label><input type="checkbox" data-model="mod-bar-metric" value="${esc(id)}"${ids.has(id) ? " checked" : ""}><span>${esc(name)}</span></label>`;
-        }).join("")}</div></fieldset>`).join("")}</div></details>
-      <div class="am-vis-selected" data-vis-selected></div>
+      <div class="am-vis-data-row"><span class="am-vis-label">数据条</span><div class="am-vis-selection">
+        <div class="am-vis-selected" data-vis-selected></div>
+        <button type="button" class="am-vis-add" data-action="mod-bar-add" aria-label="添加数据条指标" aria-haspopup="dialog" aria-controls="am-vis-popover" aria-expanded="${open && candidates.length > 0}"${candidates.length ? "" : " disabled"}>${icon("plus")}</button>
+        <div class="am-vis-popover" id="am-vis-popover" role="dialog" aria-label="选择数据条指标"${open && candidates.length ? "" : " hidden"}>
+          <div class="am-vis-source-list" role="group" aria-label="取数模块">${[...groups].map(([sourceId, fields]) =>
+            `<div class="am-vis-source-row" data-vis-source="${esc(sourceId)}">
+              <input type="checkbox" data-model="mod-bar-source" value="${esc(sourceId)}" aria-label="选择${esc(fields[0].sourceName || "取数模块")}的全部指标">
+              <button type="button" data-action="mod-bar-source" data-vis-source="${esc(sourceId)}" aria-expanded="${sourceId === active}" aria-controls="am-vis-metrics"><span>${esc(fields[0].sourceName || "取数模块")}</span>${icon("chevron-right")}</button>
+            </div>`).join("")}</div>
+          <div class="am-vis-metric-list" id="am-vis-metrics" role="group" aria-label="${esc(groups.get(active)?.[0].sourceName || "指标")}">${visualizationMetricsHTML(groups.get(active) || [], ids)}</div>
+        </div>
+      </div></div>
       <p class="am-vis-status" role="status">${candidates.length ? "" : "请先选择在报告中展示的数值指标。"}</p>`;
   }
   function refreshVisualization(message = "") {
     const region = outlet.querySelector(".am-visualization");
     if (!region) return;
     const module = store.analysis, candidates = moduleBarCandidates(store, module);
-    const open = region.querySelector("details")?.open;
+    const open = region.querySelector(".am-vis-add")?.getAttribute("aria-expanded") === "true";
     const focused = region.contains(document.activeElement) ? document.activeElement : null;
     region.innerHTML = visualizationHTML(module, candidates, open);
     updateVisualizationSelection(region, candidates, message);
     if (focused?.matches('[data-action="mod-recommend-bars"]'))
       region.querySelector('[data-action="mod-recommend-bars"]').focus({ preventScroll: true });
+    if (open && !region.querySelector(".am-vis-popover").hidden) positionVisualizationPopover(region);
     createIcons({ icons });
   }
   function updateVisualizationSelection(region, candidates, message) {
     const ids = reportBarIds(store.analysis);
     const selected = candidates.filter(({ sourceId, key }) => ids.has(reportBarId(sourceId, key)));
-    region.querySelector("[data-vis-count]").textContent = selected.length ? `已选 ${selected.length} 项` : "未选择";
-    region.querySelector("[data-vis-selected]").innerHTML = selected.map(({ name, sourceName }) =>
-      `<span class="am-vis-chip" title="${esc(sourceName || "")}">${esc(name)}</span>`).join("");
+    region.querySelector("[data-vis-selected]").innerHTML = selected.map(({ sourceId, key, name, sourceName }) =>
+      `<span class="am-vis-chip" title="${esc(sourceName || "")}"><span>${esc(name)}</span>
+        <button type="button" class="am-vis-chip-remove" data-action="mod-bar-remove" data-vis-id="${esc(reportBarId(sourceId, key))}" aria-label="移除数据条指标：${esc(name)}">${icon("x")}</button>
+      </span>`).join("");
+    region.querySelectorAll('[data-model="mod-bar-metric"]').forEach(input => { input.checked = ids.has(input.value); });
+    region.querySelectorAll('[data-model="mod-bar-source"]').forEach(input => {
+      const fields = candidates.filter(candidate => candidate.sourceId === input.value);
+      const chosen = fields.filter(({ sourceId, key }) => ids.has(reportBarId(sourceId, key))).length;
+      input.checked = chosen === fields.length && fields.length > 0;
+      input.indeterminate = chosen > 0 && chosen < fields.length;
+    });
     region.querySelector(".am-vis-status").textContent = message || (!candidates.length ? "请先选择在报告中展示的数值指标。"
       : !store.analysis.reasoning.trim() ? "填写分析思路后可使用推荐，也可以直接勾选指标。" : "");
+    createIcons({ icons });
+  }
+  function positionVisualizationPopover(region) {
+    const popup = region.querySelector(".am-vis-popover"), row = region.querySelector(".am-vis-selection");
+    const height = popup.getBoundingClientRect().height, box = row.getBoundingClientRect();
+    popup.classList.toggle("am-vis-popover-above", window.innerHeight - box.bottom < height + 8 && box.top > height + 8);
+  }
+  function closeVisualizationPopover(returnFocus = false) {
+    const region = outlet.querySelector(".am-visualization"), popup = region?.querySelector(".am-vis-popover");
+    if (!popup || popup.hidden) return;
+    popup.hidden = true;
+    region.querySelector(".am-vis-add").setAttribute("aria-expanded", "false");
+    if (returnFocus) region.querySelector(".am-vis-add").focus({ preventScroll: true });
+  }
+  function selectVisualizationSource(sourceId) {
+    const region = outlet.querySelector(".am-visualization");
+    const fields = moduleBarCandidates(store, store.analysis).filter(candidate => candidate.sourceId === sourceId);
+    if (!region || !fields.length || visualizationSources.get(store.analysis.id) === sourceId) return;
+    visualizationSources.set(store.analysis.id, sourceId);
+    region.querySelectorAll('.am-vis-source-row button').forEach(button =>
+      button.setAttribute("aria-expanded", String(button.dataset.visSource === sourceId)));
+    const list = region.querySelector(".am-vis-metric-list");
+    list.innerHTML = visualizationMetricsHTML(fields, reportBarIds(store.analysis));
+    list.setAttribute("aria-label", fields[0].sourceName || "指标");
+    list.scrollTop = 0;
+    createIcons({ icons });
+  }
+  function saveVisualizationSelection(ids, candidates) {
+    store.analysis.reportDataBars = candidates.filter(({ sourceId, key }) => ids.has(reportBarId(sourceId, key)))
+      .map(({ sourceId, key }) => ({ sourceId, key }));
+    touch(); refreshActions();
+    const region = outlet.querySelector(".am-visualization");
+    updateVisualizationSelection(region, candidates, "");
+    if (!region.querySelector(".am-vis-popover").hidden) positionVisualizationPopover(region);
   }
   function metricConfigurationHTML() {
     const module = store.analysis, active = configurationTabs.get(module.id) || "existing";
@@ -484,6 +541,26 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
       persist(); closeDialog(); render(); showToast("模块已归档"); return;
     }
     if (action === "cancel") { closeDialog(); return; }
+    if (action === "bar-add") {
+      const region = trigger.closest(".am-visualization"), popup = region.querySelector(".am-vis-popover");
+      const opening = popup.hidden;
+      popup.hidden = !opening;
+      trigger.setAttribute("aria-expanded", String(opening));
+      if (opening) {
+        positionVisualizationPopover(region);
+        region.querySelector('.am-vis-source-row button[aria-expanded="true"]')?.focus({ preventScroll: true });
+      }
+      return;
+    }
+    if (action === "bar-source") { selectVisualizationSource(trigger.dataset.visSource); return; }
+    if (action === "bar-remove") {
+      const buttons = [...outlet.querySelectorAll(".am-vis-chip-remove")], index = buttons.indexOf(trigger);
+      const ids = reportBarIds(module);
+      ids.delete(trigger.dataset.visId);
+      saveVisualizationSelection(ids, moduleBarCandidates(store, module));
+      const next = outlet.querySelectorAll(".am-vis-chip-remove")[index] || outlet.querySelector(".am-vis-add");
+      next.focus({ preventScroll: true }); return;
+    }
     if (action === "clear-goal") {
       module.goal = ""; touch();
       const fields = outlet.querySelector(".am-goal-fields");
@@ -635,9 +712,15 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
     if (model === "mod-bar-metric") {
       const candidates = moduleBarCandidates(store, module), ids = reportBarIds(module);
       if (el.checked) ids.add(el.value); else ids.delete(el.value);
-      module.reportDataBars = candidates.filter(({ sourceId, key }) => ids.has(reportBarId(sourceId, key)))
-        .map(({ sourceId, key }) => ({ sourceId, key }));
-      touch(); refreshActions(); updateVisualizationSelection(el.closest(".am-visualization"), candidates, ""); return true;
+      saveVisualizationSelection(ids, candidates); return true;
+    }
+    if (model === "mod-bar-source") {
+      const candidates = moduleBarCandidates(store, module), ids = reportBarIds(module);
+      for (const { sourceId, key } of candidates.filter(candidate => candidate.sourceId === el.value)) {
+        if (el.checked) ids.add(reportBarId(sourceId, key)); else ids.delete(reportBarId(sourceId, key));
+      }
+      selectVisualizationSource(el.value);
+      saveVisualizationSelection(ids, candidates); return true;
     }
     if (model === "mod-calc-search") {
       const picker = el.closest(".am-calc-picker"), query = el.value.trim().toLowerCase();
@@ -723,6 +806,16 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
   }
   document.addEventListener("pointerdown", (event) => {
     outlet.querySelectorAll(".am-multi-select[open], .am-field-help[open]").forEach((menu) => { if (!menu.contains(event.target)) menu.open = false; });
+    if (!event.target.closest(".am-vis-selection")) closeVisualizationPopover();
+  });
+  outlet.addEventListener("pointerover", event => {
+    const row = event.target.closest(".am-vis-source-row");
+    if (row && !row.contains(event.relatedTarget)) selectVisualizationSource(row.dataset.visSource);
+  });
+  document.addEventListener("focusin", event => {
+    if (!event.target.closest(".am-vis-selection")) closeVisualizationPopover();
+    const row = event.target.closest(".am-vis-source-row");
+    if (row) selectVisualizationSource(row.dataset.visSource);
   });
   const clearOrderDrag = () => {
     outlet.querySelectorAll(".am-order-dragging, .am-order-drop-target").forEach(el => el.classList.remove("am-order-dragging", "am-order-drop-target"));
@@ -765,6 +858,22 @@ export function createAnalysisModules({ store, outlet, main, persist, showToast,
   });
   outlet.addEventListener("dragend", clearOrderDrag);
   outlet.addEventListener("keydown", (event) => {
+    const visual = event.target.closest(".am-vis-selection");
+    if (visual) {
+      if (event.key === "Escape") { event.preventDefault(); closeVisualizationPopover(true); return; }
+      const source = event.target.closest(".am-vis-source-row");
+      if (event.key === "ArrowRight" && source) {
+        event.preventDefault();
+        selectVisualizationSource(source.dataset.visSource);
+        visual.querySelector(".am-vis-metric-list input")?.focus();
+        return;
+      }
+      if (event.key === "ArrowLeft" && event.target.closest(".am-vis-metric-list")) {
+        event.preventDefault();
+        visual.querySelector('.am-vis-source-row button[aria-expanded="true"]')?.focus();
+        return;
+      }
+    }
     const details = event.target.closest(".am-multi-select[open], .am-field-help[open]");
     if (event.key === "Escape" && details) {
       event.preventDefault();

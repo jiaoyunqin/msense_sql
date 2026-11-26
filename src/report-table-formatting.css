@@ -13,7 +13,7 @@
     bottom: 3px;
     left: 0;
     width: var(--cf-bar-width);
-    background: linear-gradient(to right, rgb(243 192 64 / 31%), rgb(253 223 125 / 17%));
+    background: linear-gradient(to right, rgb(99 159 235 / 22%), rgb(172 208 251 / 10%));
     border-radius: 2px;
     box-shadow: none;
     z-index: -1;
